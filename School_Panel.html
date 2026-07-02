@@ -79,6 +79,9 @@
     </script>
 
                             <link rel="manifest" href="manifest.json">
+    <script src="db-helper.js"></script>
+    <script src="cropper-helper.js"></script>
+    <script src="card-generator.js"></script>
 </head>
 
 <body class="flex flex-col h-screen">
@@ -565,87 +568,7 @@
             const RECORD_UPDATES_KEY = 'student_updates_v1';
             const FORM_DRAFT_KEY = 'student_draft_v1';
 
-            // --- IndexedDB Wrapper & Offline Queue ---
-            const SchoolLocalDB = {
-                dbName: 'SchoolSystemDB',
-                version: 1,
-                init: function() {
-                    return new Promise((resolve, reject) => {
-                        const request = indexedDB.open(this.dbName, this.version);
-                        request.onupgradeneeded = (e) => {
-                            const idb = e.target.result;
-                            if (!idb.objectStoreNames.contains('store')) {
-                                idb.createObjectStore('store');
-                            }
-                            if (!idb.objectStoreNames.contains('syncQueue')) {
-                                idb.createObjectStore('syncQueue', { keyPath: 'id' });
-                            }
-                        };
-                        request.onsuccess = (e) => resolve(e.target.result);
-                        request.onerror = (e) => reject(e.target.error);
-                    });
-                },
-                get: async function(key) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('store', 'readonly');
-                            const store = tx.objectStore('store');
-                            const req = store.get(key);
-                            req.onsuccess = () => resolve(req.result);
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { return null; }
-                },
-                set: async function(key, val) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('store', 'readwrite');
-                            const store = tx.objectStore('store');
-                            const req = store.put(val, key);
-                            req.onsuccess = () => resolve();
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { console.warn(e); }
-                },
-                enqueueSync: async function(record) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('syncQueue', 'readwrite');
-                            const store = tx.objectStore('syncQueue');
-                            const req = store.put(record);
-                            req.onsuccess = () => resolve();
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { console.warn(e); }
-                },
-                dequeueSync: async function(id) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('syncQueue', 'readwrite');
-                            const store = tx.objectStore('syncQueue');
-                            const req = store.delete(id);
-                            req.onsuccess = () => resolve();
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { console.warn(e); }
-                },
-                getAllSyncQueue: async function() {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('syncQueue', 'readonly');
-                            const store = tx.objectStore('syncQueue');
-                            const req = store.getAll();
-                            req.onsuccess = () => resolve(req.result || []);
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { return []; }
-                }
-            };
+            // --- Local DB helper is imported from db-helper.js ---
 
             async function persistLocalUnverified() {
                 try {
@@ -658,22 +581,7 @@
                 } catch(e) { console.warn("Failed to persist local unverified records", e); }
             }
 
-            window.addEventListener('online', async () => {
-                const queue = await SchoolLocalDB.getAllSyncQueue();
-                if (queue.length > 0) {
-                    showToast('<span class="material-symbols-outlined mr-2">cloud_upload</span> Syncing ' + queue.length + ' offline records...');
-                    for (const item of queue) {
-                        serverCallSilent(item.fn, [item.data], async () => {
-                            await SchoolLocalDB.dequeueSync(item.id);
-                            const idx = db.findIndex(x => x.id === item.id);
-                            if (idx > -1) {
-                                db[idx]._syncStatus = 'synced';
-                                if (currentTab === 'records') renderCurrentRecordsPage();
-                            }
-                        });
-                    }
-                }
-            });
+            // --- Online sync listener is imported from db-helper.js ---
             const AUTH_USER_KEY = 'student_auth_v1';
             const CONFIG_KEY = 'school_config_v1';
             const DEMO_RECORDS = [];
@@ -701,185 +609,7 @@
             let fb_draftMode = false;
 
             
-            function serverCall(fn, args, onSuccess, onFailure) {
-                if (fn === 'loginUser') {
-                    const credentials = args[0] || {};
-                    const userId = (credentials.userId || '').toLowerCase();
-                    if (userId.includes('admin') && (credentials.password || '').trim() === '') {
-                        setTimeout(() => onSuccess({ role: 'teacher', name: 'Admin', userId: 'admin', viewMode: 'all' }), 500);
-                        return;
-                    } else if (userId.includes('teacher')) {
-                        setTimeout(() => onSuccess({ role: 'teacher', name: 'Teacher', userId: credentials.userId }), 500);
-                        return;
-                    } else if (userId.includes('admin')) {
-                        setTimeout(() => onFailure({ message: 'Admin login will be linked later.' }), 500);
-                        return;
-                    } else {
-                        setTimeout(() => onSuccess({ role: 'teacher', name: credentials.userId, userId: credentials.userId }), 500);
-                        return;
-                    }
-                }
-                if (window.db && window.firebaseAPI) {
-                    handleFirebaseCall(fn, args, onSuccess, onFailure);
-                } else {
-                    if (fn === 'getRecords') setTimeout(() => onSuccess(typeof mockRecords !== 'undefined' ? mockRecords : []), 500);
-                    else setTimeout(() => onFailure(new Error("Firebase is not initialized or offline")), 500);
-                }
-            }
-            function serverCallSilent(fn, args, onSuccess, onFailure) {
-                // Block unverified records from being pushed to the server or queued
-                if (fn === 'updateRecord' || fn === 'submitStudentData' || fn === 'addRecord') {
-                    const rec = args[0];
-                    if (rec) {
-                        const isVerified = rec.verified === true || String(rec.verified).toLowerCase() === 'true' || rec.verified === 'Identify' || rec.verified === 'Completed';
-                        if (!isVerified) {
-                            if (onSuccess) onSuccess(rec);
-                            return; // Do NOT hit server and do NOT queue
-                        }
-                    }
-                }
-
-                if (!navigator.onLine && (fn === 'updateRecord' || fn === 'submitStudentData' || fn === 'addRecord' || fn === 'deleteRecord')) {
-                    const rec = args[0];
-                    if (rec && rec.id) {
-                        SchoolLocalDB.enqueueSync({ id: rec.id, fn: fn, data: rec, timestamp: Date.now() });
-                        if (onSuccess) onSuccess(rec);
-                        return;
-                    }
-                }
-                serverCall(fn, args, onSuccess, (err) => {
-                    if (fn === 'updateRecord' || fn === 'submitStudentData' || fn === 'addRecord' || fn === 'deleteRecord') {
-                        const rec = args[0];
-                        if (rec && rec.id) {
-                            SchoolLocalDB.enqueueSync({ id: rec.id, fn: fn, data: rec, timestamp: Date.now() });
-                            if (onSuccess) onSuccess(rec);
-                            return;
-                        }
-                    }
-                    if (onFailure) onFailure(err);
-                });
-            }
-            async function handleFirebaseCall(fn, args, onSuccess, onFailure) {
-                const { collection, addDoc, getDocs, getDoc, updateDoc, setDoc, deleteDoc, doc, query, orderBy, onSnapshot } = window.firebaseAPI;
-                try {
-                    if (fn === 'getRecords') {
-                        if (window._recordsUnsubscribe) {
-                            window._recordsUnsubscribe();
-                        }
-                        const q = query(collection(window.db, "records"), orderBy("updatedAt", "desc"));
-                        window._recordsUnsubscribe = onSnapshot(q, (querySnapshot) => {
-                            const records = [];
-                            querySnapshot.forEach((doc) => { records.push({ id: doc.id, ...doc.data() }); });
-                            if (onSuccess) onSuccess(records);
-                        }, (error) => {
-                            console.error("Firebase Snapshot Error:", error);
-                        });
-                    } else if (fn === 'submitStudentData' || fn === 'addRecord') {
-                        const data = args[0];
-                        data.updatedAt = Date.now();
-                        const cleanData = JSON.parse(JSON.stringify(data));
-                        if (cleanData.id && !String(cleanData.id).startsWith('draft_') && !String(cleanData.id).startsWith('TEMP_')) {
-                            const docRef = doc(window.db, "records", String(cleanData.id));
-                            await setDoc(docRef, cleanData);
-                            if (onSuccess) onSuccess(data);
-                        } else {
-                            const docRef = await addDoc(collection(window.db, "records"), cleanData);
-                            data.id = docRef.id;
-                            if (onSuccess) onSuccess(data);
-                        }
-                    } else if (fn === 'updateStudentData' || fn === 'updateRecord') {
-                        const data = args[0];
-                        data.updatedAt = Date.now();
-                        const cleanData = JSON.parse(JSON.stringify(data));
-                        const docRef = doc(window.db, "records", String(cleanData.id));
-                        await setDoc(docRef, cleanData, { merge: true });
-                        
-                        // Delete old document from Firebase if the ID changed (e.g. from draft_ to serial-numbered ID)
-                        if (data.oldId && String(data.oldId) !== String(data.id)) {
-                            try {
-                                const oldDocRef = doc(window.db, "records", String(data.oldId));
-                                await deleteDoc(oldDocRef);
-                                console.log("Deleted old draft document from Firebase:", data.oldId);
-                            } catch(e) {
-                                console.warn("Failed to delete old draft document from Firebase:", e);
-                            }
-                        }
-                        
-                        if (onSuccess) onSuccess(data);
-                    } else if (fn === 'permanentDelete' || fn === 'deleteRecord') {
-                        const id = args[0];
-                        const docRef = doc(window.db, "records", String(id));
-                        await deleteDoc(docRef);
-                        if (onSuccess) onSuccess(true);
-                    } else if (fn === 'deleteAllRecords') {
-                        const q = query(collection(window.db, "records"));
-                        const querySnapshot = await getDocs(q);
-                        const promises = [];
-                        querySnapshot.forEach((document) => {
-                            promises.push(deleteDoc(doc(window.db, "records", document.id)));
-                        });
-                        await Promise.all(promises);
-                        if (onSuccess) onSuccess(true);
-                    } else if (fn === 'saveFormFields') {
-                        const data = args[0];
-                        const docRef = doc(window.db, "system", "formBuilderConfig");
-                        await setDoc(docRef, data);
-                        if (onSuccess) onSuccess();
-                    } else if (fn === 'getFormFields') {
-                        const docRef = doc(window.db, "system", "formBuilderConfig");
-                        const docSnap = await getDoc(docRef);
-                        if (docSnap.exists()) {
-                            if (onSuccess) onSuccess(docSnap.data());
-                        } else {
-                            if (onSuccess) onSuccess(null);
-                        }
-                    } else if (fn === 'generateId') {
-                        const { runTransaction } = window.firebaseAPI;
-                        if (!runTransaction) throw new Error("runTransaction missing");
-                        const localMaxSn = args[0] || 0;
-                        const counterRef = doc(window.db, "config", "snCounter");
-                        try {
-                            const newSn = await runTransaction(window.db, async (transaction) => {
-                                const sfDoc = await transaction.get(counterRef);
-                                let currentSn = 0;
-                                if (sfDoc.exists()) {
-                                    currentSn = sfDoc.data().value || 0;
-                                    if (currentSn > 1000000000) currentSn = 0;
-                                }
-                                const nextSn = Math.max(currentSn, localMaxSn) + 1;
-                                transaction.set(counterRef, { value: nextSn }, { merge: true });
-                                return nextSn;
-                            });
-                            if (onSuccess) onSuccess(newSn);
-                        } catch (e) {
-                            if (onFailure) onFailure(e);
-                        }
-                    } else if (fn === 'uploadRecordDocument') {
-                        const { ref, uploadString, getDownloadURL } = window.firebaseAPI;
-                        if (!window.storage) throw new Error("Firebase Storage is not initialized.");
-                        const payload = args[0];
-                        const storageRef = ref(window.storage, `documents/${payload.fileName}`);
-                        await uploadString(storageRef, payload.base64Data, 'base64', {
-                            contentType: payload.mimeType
-                        });
-                        const downloadURL = await getDownloadURL(storageRef);
-                        if (onSuccess) {
-                            onSuccess({
-                                fileId: payload.fileName,
-                                url: downloadURL,
-                                previewUrl: downloadURL,
-                                mimeType: payload.mimeType,
-                                size: 0
-                            });
-                        }
-                    } else {
-                        if (onSuccess) onSuccess(true);
-                    }
-                } catch (error) {
-                    console.error("Firebase Error:", error);
-                    if (onFailure) onFailure(error);
-                }
-            }
+            // --- Database sync functions are imported from db-helper.js ---
     
             
 
@@ -2641,31 +2371,74 @@
                 const nameInput = document.getElementById('config-name'); if (nameInput) nameInput.value = schoolConfig.name;
                 const aboutEl = document.getElementById('settings-about-display'); if (aboutEl) aboutEl.innerText = schoolConfig.systemAbout || schoolConfig.about || '';
                 
+                // Update School Header Contact Details
+                const schoolContactEl = document.getElementById('settings-school-contact-display');
+                if (schoolContactEl) schoolContactEl.innerText = schoolConfig.contactPerson || 'Contact not set';
+                
+                const schoolAddressEl = document.getElementById('settings-school-address-display');
+                if (schoolAddressEl) schoolAddressEl.innerText = schoolConfig.address || 'Address not set';
+                const schoolAddressLink = document.getElementById('settings-school-address-link');
+                if (schoolAddressLink) schoolAddressLink.href = schoolConfig.address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.address)}` : '#';
+
+                const schoolMobileEl = document.getElementById('settings-school-mobile-display');
+                if (schoolMobileEl) schoolMobileEl.innerText = schoolConfig.mobile || 'No Mobile';
+                const schoolMobileLink = document.getElementById('settings-school-mobile-link');
+                if (schoolMobileLink) {
+                    if (schoolConfig.mobile) {
+                        schoolMobileLink.href = `tel:${schoolConfig.mobile}`;
+                        schoolMobileLink.style.pointerEvents = 'auto';
+                    } else {
+                        schoolMobileLink.removeAttribute('href');
+                        schoolMobileLink.style.pointerEvents = 'none';
+                    }
+                }
+
+                const schoolEmailEl = document.getElementById('settings-school-email-display');
+                if (schoolEmailEl) schoolEmailEl.innerText = schoolConfig.email || 'No Email';
+                const schoolEmailLink = document.getElementById('settings-school-email-link');
+                if (schoolEmailLink) {
+                    if (schoolConfig.email) {
+                        schoolEmailLink.href = `mailto:${schoolConfig.email}`;
+                        schoolEmailLink.style.pointerEvents = 'auto';
+                    } else {
+                        schoolEmailLink.removeAttribute('href');
+                        schoolEmailLink.style.pointerEvents = 'none';
+                    }
+                }
+                
                 // Admin info rendering in settings
                 const adminInfoContainer = document.getElementById('settings-admin-info-container');
                 if (adminInfoContainer) {
                     let hasInfo = false;
                     
+                    const admPhone = schoolConfig.adminMobile || '';
+                    const admEmail = schoolConfig.adminEmail || '';
+                    const admWhatsapp = schoolConfig.adminWhatsapp || '';
+                    const admAddress = schoolConfig.adminAddress || '';
+                    const admFb = schoolConfig.adminFacebook || '';
+                    const admIg = schoolConfig.adminInstagram || '';
+                    const admYt = schoolConfig.adminYoutube || '';
+                    
                     const p = document.getElementById('settings-admin-phone');
-                    if (p && schoolConfig.mobile) { p.href = 'tel:' + schoolConfig.mobile; document.getElementById('settings-admin-phone-txt').innerText = schoolConfig.mobile; p.classList.remove('hidden'); hasInfo = true; } else if(p) p.classList.add('hidden');
+                    if (p && admPhone) { p.href = 'tel:' + admPhone; document.getElementById('settings-admin-phone-txt').innerText = admPhone; p.classList.remove('hidden'); hasInfo = true; } else if(p) p.classList.add('hidden');
                     
                     const e = document.getElementById('settings-admin-email');
-                    if (e && schoolConfig.email) { e.href = 'mailto:' + schoolConfig.email; e.classList.remove('hidden'); hasInfo = true; } else if(e) e.classList.add('hidden');
+                    if (e && admEmail) { e.href = 'mailto:' + admEmail; e.classList.remove('hidden'); hasInfo = true; } else if(e) e.classList.add('hidden');
                     
                     const wa = document.getElementById('settings-admin-wa');
-                    if (wa && schoolConfig.whatsapp) { wa.href = 'https://wa.me/' + schoolConfig.whatsapp.replace(/[^0-9]/g, ''); wa.classList.remove('hidden'); hasInfo = true; } else if(wa) wa.classList.add('hidden');
+                    if (wa && admWhatsapp) { wa.href = 'https://wa.me/' + admWhatsapp.replace(/[^0-9]/g, ''); wa.classList.remove('hidden'); hasInfo = true; } else if(wa) wa.classList.add('hidden');
                     
                     const addr = document.getElementById('settings-admin-address');
-                    if (addr && schoolConfig.address) { document.getElementById('settings-admin-address-txt').innerText = schoolConfig.address; addr.classList.remove('hidden'); hasInfo = true; } else if(addr) addr.classList.add('hidden');
+                    if (addr && admAddress) { document.getElementById('settings-admin-address-txt').innerText = admAddress; addr.classList.remove('hidden'); hasInfo = true; } else if(addr) addr.classList.add('hidden');
                     
                     const fb = document.getElementById('settings-admin-fb');
-                    if (fb && schoolConfig.facebook) { fb.href = schoolConfig.facebook; fb.classList.remove('hidden'); hasInfo = true; } else if(fb) fb.classList.add('hidden');
+                    if (fb && admFb) { fb.href = admFb; fb.classList.remove('hidden'); hasInfo = true; } else if(fb) fb.classList.add('hidden');
                     
                     const ig = document.getElementById('settings-admin-ig');
-                    if (ig && schoolConfig.instagram) { ig.href = schoolConfig.instagram; ig.classList.remove('hidden'); hasInfo = true; } else if(ig) ig.classList.add('hidden');
+                    if (ig && admIg) { ig.href = admIg; ig.classList.remove('hidden'); hasInfo = true; } else if(ig) ig.classList.add('hidden');
                     
                     const yt = document.getElementById('settings-admin-yt');
-                    if (yt && schoolConfig.youtube) { yt.href = schoolConfig.youtube; yt.classList.remove('hidden'); hasInfo = true; } else if(yt) yt.classList.add('hidden');
+                    if (yt && admYt) { yt.href = admYt; yt.classList.remove('hidden'); hasInfo = true; } else if(yt) yt.classList.add('hidden');
                     
                     if (hasInfo) {
                         adminInfoContainer.classList.remove('hidden');
@@ -3581,7 +3354,7 @@
 
                 const nextSn = nowTs;
                 lastFetchedSn = nextSn;
-                const structuredId = `draft_${schoolCode}-${nextSn}`;
+                const structuredId = `draft_${schoolCode}-${nextSn}-${Math.floor(Math.random() * 10000)}`;
                 draftServerRecordId = structuredId;
                 
                 const reservationPayload = {
@@ -6258,11 +6031,47 @@
                     if (blankRecordMode === 'settings') {
                         t.innerHTML = `
                 <div class="p-6 bg-white rounded-3xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 system-card">
-                    <div class="text-center pb-2">
-                        <div class="w-24 h-24 rounded-3xl bg-emerald-50 mx-auto flex items-center justify-center mb-4 border-2 border-emerald-100 shadow-sm relative overflow-hidden">
+                    <div class="flex items-stretch gap-4 text-left pb-2">
+                        <div onclick="openImagePreviewModal(schoolConfig ? schoolConfig.logo : null)" class="w-24 h-24 rounded-3xl bg-emerald-50 flex items-center justify-center border-2 border-emerald-100 shadow-sm relative overflow-hidden shrink-0 cursor-pointer hover:scale-105 active:scale-95 transition-transform" title="Tap to Zoom Logo">
                             ${schoolConfig.logo ? `<img src="${schoolConfig.logo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-school-flag text-5xl text-emerald-600"></i>`}
                         </div>
-                        <h3 class="text-xl font-black text-slate-800 mb-1">${schoolConfig.name || 'School Name'}</h3>
+                        <div class="flex flex-col justify-between py-1 min-w-0 flex-1 h-24">
+                            <!-- School Name (slightly larger) -->
+                            <h3 class="text-[15px] font-black text-slate-800 truncate leading-tight">${schoolConfig.name || 'School Name'}</h3>
+                            
+                            <!-- Address (immediately under School Name, same text size) -->
+                            <div class="text-[10px] text-slate-700 font-extrabold leading-normal truncate">
+                                <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.address || '')}" target="_blank" class="hover:underline hover:text-emerald-700 transition-colors">
+                                    <i class="fa-solid fa-location-dot text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.address || 'Address not set'}
+                                </a>
+                            </div>
+
+                            <!-- Contact Person & Mobile (inline, same text size) -->
+                            <div class="text-[10px] text-slate-700 font-extrabold leading-normal truncate flex items-center gap-1.5">
+                                <span class="truncate"><i class="fa-solid fa-user-tie text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.contactPerson || 'Contact not set'}</span>
+                                <span class="text-slate-400">•</span>
+                                <span class="text-slate-800 font-black tracking-wider uppercase shrink-0">
+                                    ${schoolConfig.mobile ? `
+                                        <a href="tel:${schoolConfig.mobile}" class="hover:underline hover:text-emerald-700 transition-colors">
+                                            <i class="fa-solid fa-phone text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.mobile}
+                                        </a>
+                                    ` : `
+                                        <i class="fa-solid fa-phone text-emerald-600 mr-1 text-[9px]"></i>No Mobile
+                                    `}
+                                </span>
+                            </div>
+
+                            <!-- Email (same text size) -->
+                            <div class="text-[10px] text-slate-800 font-black tracking-wider uppercase truncate">
+                                ${schoolConfig.email ? `
+                                    <a href="mailto:${schoolConfig.email}" class="hover:underline hover:text-emerald-700 transition-colors">
+                                        <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.email}
+                                    </a>
+                                ` : `
+                                    <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[9px]"></i>No Email
+                                `}
+                            </div>
+                        </div>
                     </div>
 
                     <div class="space-y-3">
@@ -6369,37 +6178,37 @@
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-phone"></i></div>
                                 <div>Mobile No</div>
                                 <div>:</div>
-                                <div><a href="tel:${schoolConfig.mobile || '7999565002'}" class="text-indigo-600 hover:underline">${schoolConfig.mobile || '7999565002'}</a></div>
+                                <div><a href="tel:${schoolConfig.adminMobile || '7999565002'}" class="text-indigo-600 hover:underline">${schoolConfig.adminMobile || '7999565002'}</a></div>
                                 
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-envelope"></i></div>
                                 <div>Email ID</div>
                                 <div>:</div>
-                                <div class="break-all"><a href="mailto:${schoolConfig.email || 'Identify.jvd@gmail.com'}" class="text-indigo-600 hover:underline">${schoolConfig.email || 'Identify.jvd@gmail.com'}</a></div>
+                                <div class="break-all"><a href="mailto:${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}" class="text-indigo-600 hover:underline">${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}</a></div>
                                 
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-location-dot"></i></div>
                                 <div>Address</div>
                                 <div>:</div>
                                 <div class="leading-relaxed">
-                                    <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.address || 'Anjuman Complex Chhindwara')}" target="_blank" class="text-indigo-600 hover:underline">${sanitizeHTML(schoolConfig.address || 'Anjuman Complex Chhindwara')}</a>
+                                    <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.adminAddress || 'Anjuman Complex Chhindwara')}" target="_blank" class="text-indigo-600 hover:underline">${sanitizeHTML(schoolConfig.adminAddress || 'Anjuman Complex Chhindwara')}</a>
                                 </div>
                             </div>
                             <div class="pt-3 border-t border-slate-200 flex flex-wrap gap-2 items-center justify-center">
-                                <a href="tel:${schoolConfig.mobile || '7999565002'}" class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center hover:bg-slate-200 transition-all" title="Call">
+                                <a href="tel:${schoolConfig.adminMobile || '7999565002'}" class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center hover:bg-slate-200 transition-all" title="Call">
                                     <i class="fa-solid fa-phone"></i>
                                 </a>
-                                <a href="${schoolConfig.whatsapp || (schoolConfig.mobile ? `https://wa.me/91${String(schoolConfig.mobile).replace(/\D/g,'')}` : 'https://wa.me/917999565002')}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-green-100 text-green-700 flex items-center justify-center hover:bg-green-200 transition-all" title="WhatsApp">
+                                <a href="${schoolConfig.adminWhatsapp ? `https://wa.me/91${String(schoolConfig.adminWhatsapp).replace(/\D/g,'')}` : (schoolConfig.adminMobile ? `https://wa.me/91${String(schoolConfig.adminMobile).replace(/\D/g,'')}` : 'https://wa.me/917999565002')}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-green-100 text-green-700 flex items-center justify-center hover:bg-green-200 transition-all" title="WhatsApp">
                                     <i class="fa-brands fa-whatsapp"></i>
                                 </a>
-                                <a href="mailto:${schoolConfig.email || 'Identify.jvd@gmail.com'}" class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center hover:bg-slate-200 transition-all" title="Email">
+                                <a href="mailto:${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}" class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center hover:bg-slate-200 transition-all" title="Email">
                                     <i class="fa-solid fa-envelope"></i>
                                 </a>
-                                <a href="${schoolConfig.youtube || 'https://www.youtube.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-red-100 text-red-700 flex items-center justify-center hover:bg-red-200 transition-all" title="YouTube">
+                                <a href="${schoolConfig.adminYoutube || 'https://www.youtube.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-red-100 text-red-700 flex items-center justify-center hover:bg-red-200 transition-all" title="YouTube">
                                     <i class="fa-brands fa-youtube"></i>
                                 </a>
-                                <a href="${schoolConfig.instagram || 'https://www.instagram.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center hover:bg-pink-200 transition-all" title="Instagram">
+                                <a href="${schoolConfig.adminInstagram || 'https://www.instagram.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-pink-100 text-pink-700 flex items-center justify-center hover:bg-pink-200 transition-all" title="Instagram">
                                     <i class="fa-brands fa-instagram"></i>
                                 </a>
-                                <a href="${schoolConfig.facebook || 'https://www.facebook.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center hover:bg-blue-200 transition-all" title="Facebook">
+                                <a href="${schoolConfig.adminFacebook || 'https://www.facebook.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center hover:bg-blue-200 transition-all" title="Facebook">
                                     <i class="fa-brands fa-facebook-f"></i>
                                 </a>
                             </div>
@@ -7659,8 +7468,10 @@
                     try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, db[idxSync]).catch(()=>{}); } catch(e){}
                 }
                 
+                filterRecords();
+                
                 const currentIdNew = localRec.id;
-                const pendingList = db.filter(x => !hasRecordDocument(x) && x.id !== currentIdNew);
+                const pendingList = db.filter(x => !hasRecordDocument(x) && x.verified !== true && x.isDeleted !== true && x.id !== currentIdNew);
 
                 if (pendingList.length > 0) {
                     isPendingBatch = true;
@@ -7751,7 +7562,7 @@
                 if (isPendingBatch) {
                     const currentId = previewRecord ? previewRecord.id : null;
                     // Find records without documents, excluding the one we just processed
-                    const pendingList = db.filter(x => !hasRecordDocument(x) && x.id !== currentId);
+                    const pendingList = db.filter(x => !hasRecordDocument(x) && x.verified !== true && x.isDeleted !== true && x.id !== currentId);
 
                     if (pendingList.length > 0) {
                         // Show preview of the next one
@@ -8124,6 +7935,45 @@
                 }
             }
 
+            function openImagePreviewModal(src) {
+                if (!src) return;
+                const modal = document.createElement('div');
+                modal.id = 'image-zoom-modal';
+                modal.className = 'fixed inset-0 bg-black/85 backdrop-blur-md z-[99999] flex items-center justify-center p-4 animate-in fade-in duration-200';
+                modal.onclick = () => closeModal();
+
+                const container = document.createElement('div');
+                container.className = 'relative max-w-full max-h-[85vh] flex items-center justify-center transform scale-90 opacity-0 transition-all duration-300 ease-out';
+                requestAnimationFrame(() => {
+                    container.classList.remove('scale-90', 'opacity-0');
+                    container.classList.add('scale-100', 'opacity-100');
+                });
+
+                const img = document.createElement('img');
+                img.src = src;
+                img.className = 'max-w-full max-h-[85vh] rounded-2xl shadow-2xl object-contain border-2 border-white/10';
+                img.onclick = (e) => e.stopPropagation();
+
+                const closeBtn = document.createElement('button');
+                closeBtn.innerHTML = '<i class="fa-solid fa-xmark text-lg"></i>';
+                closeBtn.className = 'absolute -top-3 -right-3 w-10 h-10 rounded-full bg-white text-slate-800 shadow-xl flex items-center justify-center active:scale-90 hover:bg-slate-100 transition-all z-50 border border-slate-200';
+                closeBtn.onclick = closeModal;
+
+                function closeModal() {
+                    modal.classList.add('fade-out');
+                    container.classList.remove('scale-100', 'opacity-100');
+                    container.classList.add('scale-90', 'opacity-0');
+                    setTimeout(() => {
+                        modal.remove();
+                    }, 250);
+                }
+
+                container.appendChild(img);
+                container.appendChild(closeBtn);
+                modal.appendChild(container);
+                document.body.appendChild(modal);
+            }
+
             // --- HOME CARD EXPAND/COLLAPSE ---
             const expandTimers = new Map();
             function setCardExpanded(card, expanded) {
@@ -8363,15 +8213,41 @@
                     class="absolute top-5 right-6 w-9 h-9 rounded-full bg-slate-100/50 hover:bg-rose-50 hover:text-rose-500 flex items-center justify-center text-slate-500 transition active:scale-90 z-20">
                     <i class="fa-solid fa-xmark text-sm"></i>
                 </button>
-                <div class="px-8 pt-10 pb-6 text-center">
-                    <div id="settings-logo-container"
-                        class="w-20 h-20 rounded-3xl bg-emerald-50 mx-auto flex items-center justify-center mb-4 border-2 border-emerald-100 overflow-hidden">
-                        <i class="fa-solid fa-school-flag text-4xl text-emerald-600"></i>
+                <div class="px-8 pt-10 pb-6 flex items-stretch gap-4 text-left">
+                    <div id="settings-logo-container" onclick="openImagePreviewModal(schoolConfig ? schoolConfig.logo : null)"
+                        class="w-20 h-20 rounded-3xl bg-emerald-50 flex items-center justify-center border-2 border-emerald-100 overflow-hidden shrink-0 shadow-sm cursor-pointer hover:scale-105 active:scale-95 transition-transform" title="Tap to Zoom Logo">
+                        <i class="fa-solid fa-school-flag text-3xl text-emerald-600"></i>
                     </div>
-                    <h3 id="settings-school-name-display" class="text-xl font-black text-slate-800 mb-1">School Name
-                    </h3>
-                    <p id="settings-about-display" class="text-xs text-slate-400 font-bold uppercase tracking-widest">
-                        System About</p>
+                    <div class="flex flex-col justify-between py-0.5 min-w-0 flex-1 h-20">
+                        <!-- School Name (larger) -->
+                        <h3 id="settings-school-name-display" class="text-sm font-black text-slate-800 truncate leading-tight">School Name</h3>
+                        
+                        <!-- Address (immediately under School Name, same text size) -->
+                        <div class="text-[9.5px] text-slate-700 font-extrabold leading-tight truncate">
+                            <a id="settings-school-address-link" href="#" target="_blank" class="hover:underline hover:text-emerald-700 transition-colors">
+                                <i class="fa-solid fa-location-dot text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-address-display">--</span>
+                            </a>
+                        </div>
+
+                        <!-- Contact & Mobile (inline, same text size) -->
+                        <div class="text-[9.5px] text-slate-700 font-extrabold leading-tight truncate flex items-center gap-1.5">
+                            <span class="truncate"><i class="fa-solid fa-user-tie text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-contact-display">--</span></span>
+                            <span class="text-slate-400">•</span>
+                            <span class="text-slate-800 font-black tracking-wider uppercase shrink-0">
+                                <a id="settings-school-mobile-link" href="#" class="hover:underline hover:text-emerald-700 transition-colors">
+                                    <i class="fa-solid fa-phone text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-mobile-display">--</span>
+                                </a>
+                            </span>
+                        </div>
+
+                        <!-- Email (same text size) -->
+                        <div class="text-[9.5px] text-slate-800 font-black tracking-wider uppercase truncate">
+                            <a id="settings-school-email-link" href="#" class="hover:underline hover:text-emerald-700 transition-colors">
+                                <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-email-display">--</span>
+                            </a>
+                        </div>
+                    </div>
+                    <div id="settings-about-display" class="hidden"></div>
                 </div>
 
                 <div class="px-8 space-y-5 flex-1 overflow-y-auto custom-scroll system-scroll pb-10">
@@ -8927,6 +8803,7 @@
                         </div>
                     </div>
                     <div class="flex items-center justify-end gap-2 border-t border-slate-50 pt-3">
+                        <div class="mr-auto w-7 h-7 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center font-black text-[11px] border border-emerald-200/50" title="Field Position">${renderedCount + 1}</div>
                         ${qrEnabled && effectiveType !== 'image' && field.id !== 'photo' && effectiveType !== 'section' ? `
                         <button onclick="fb_toggleFieldQr('${field.id}')" class="w-9 h-9 rounded-full border-2 transition active:scale-95 hover:shadow-sm ${qrFields.includes(field.id) ? 'border-emerald-500 bg-emerald-50 text-emerald-600' : 'border-slate-200 text-slate-400 bg-slate-50 hover:bg-emerald-50 hover:text-emerald-500 hover:border-emerald-200'}" title="Include in QR Code">
                             <i class="fa-solid fa-qrcode text-[11px]"></i>
@@ -8975,6 +8852,7 @@
                             </div>
                         </div>
                         <div class="mt-4 flex items-center justify-end gap-2 border-t border-slate-50 pt-3">
+                            <div class="mr-auto w-7 h-7 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center font-black text-[11px] border border-emerald-200/50" title="Field Position">${renderedCount + 1}</div>
                             ${qrEnabled && field.type !== 'image' && field.type !== 'section' ? `
                             <button onclick="fb_toggleFieldQr('${field.id}')" class="w-9 h-9 rounded-full border-2 transition active:scale-95 hover:shadow-sm ${qrFields.includes(field.id) ? 'border-emerald-500 bg-emerald-50 text-emerald-600' : 'border-slate-200 text-slate-400 bg-slate-50 hover:bg-emerald-50 hover:text-emerald-500 hover:border-emerald-200'}" title="Include in QR Code">
                                 <i class="fa-solid fa-qrcode text-[11px]"></i>
@@ -9549,6 +9427,16 @@
             const idx = fb_removed.findIndex(f => String(f.id) === String(id));
             if (idx === -1) return;
             const item = fb_removed[idx];
+            
+            // Move/append restored field ID to the end of fb_form_order
+            if (Array.isArray(fb_form_order)) {
+                const orderIdx = fb_form_order.indexOf(id);
+                if (orderIdx !== -1) {
+                    fb_form_order.splice(orderIdx, 1);
+                }
+                fb_form_order.push(id);
+            }
+
             if (item.__source === 'standard') {
                 if (!(item.id in fb_standard_config)) fb_standard_config[item.id] = { enabled: true, required: false };
                 fb_standard_config[item.id].enabled = true;
@@ -9673,143 +9561,7 @@
                 }, 1000);
             });
         }
-            let cropperInstance = null;
-                        let currentlyCroppingCustomIdx = null; // 1-indexed (1 to 5) or null for student photo
-            
-                        function openCropModal() {
-                            currentlyCroppingCustomIdx = null;
-                            const img = document.getElementById('blank-photo-preview-img');
-                            if (!img || !img.src) return;
-            
-                            const modal = document.getElementById('crop-modal');
-                            const cropImg = document.getElementById('crop-modal-img');
-            
-                            cropImg.src = img.src;
-                            modal.classList.remove('hidden');
-                            modal.classList.add('flex');
-            
-                            const pMeta = (typeof fb_standard_meta !== 'undefined' ? fb_standard_meta['photo'] : null) || (schoolConfig && schoolConfig.formMeta && schoolConfig.formMeta['photo']) || {};
-                            const cWidth = pMeta.width || 600;
-                            const cHeight = pMeta.height || 800;
-            
-                            if (cropperInstance) { cropperInstance.destroy(); }
-                            cropperInstance = new Cropper(cropImg, {
-                                aspectRatio: cWidth / cHeight,
-                                viewMode: 1,
-                                autoCropArea: 1,
-                            });
-                        }
-            
-                        function openCustomCropModal(idx) {
-                            currentlyCroppingCustomIdx = idx;
-                            const img = document.getElementById(`blank-custom-img-preview-${idx}`);
-                            if (!img || !img.src) return;
-            
-                            const modal = document.getElementById('crop-modal');
-                            const cropImg = document.getElementById('crop-modal-img');
-            
-                            cropImg.src = img.src;
-                            modal.classList.remove('hidden');
-                            modal.classList.add('flex');
-            
-                            const field = fb_fields[idx - 1];
-                            const imgWidth = field.width || 600;
-                            const imgHeight = field.height || 800;
-            
-                            if (cropperInstance) { cropperInstance.destroy(); }
-                            cropperInstance = new Cropper(cropImg, {
-                                aspectRatio: imgWidth / imgHeight,
-                                viewMode: 1,
-                                autoCropArea: 1,
-                            });
-                        }
-            
-                        function closeCropModal() {
-                            const modal = document.getElementById('crop-modal');
-                            if (modal) {
-                                modal.classList.add('hidden');
-                                modal.classList.remove('flex');
-                            }
-                            currentlyCroppingCustomIdx = null;
-                            if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
-                        }
-            
-                        function applyCrop() {
-                            if (!cropperInstance) return;
-                            
-                            if (currentlyCroppingCustomIdx !== null) {
-                                const idx = currentlyCroppingCustomIdx;
-                                const field = fb_fields[idx - 1];
-                                const imgWidth = field.width || 600;
-                                const imgHeight = field.height || 800;
-                                const canvas = cropperInstance.getCroppedCanvas({
-                                    width: imgWidth,
-                                    height: imgHeight,
-                                });
-                                if (canvas) {
-                                    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-                                    syncBlankField(`in-customField${idx}`, dataUrl);
-                                    
-                                    const previewImg = document.getElementById(`blank-custom-img-preview-${idx}`);
-                                    const placeholder = document.getElementById(`blank-custom-img-placeholder-${idx}`);
-                                    const container = document.getElementById(`blank-custom-img-container-${idx}`);
-                                    
-                                    if (previewImg) {
-                                        previewImg.src = dataUrl;
-                                        previewImg.classList.remove('hidden');
-                                    }
-                                    if (placeholder) {
-                                        placeholder.classList.add('hidden');
-                                    }
-                                    
-                                    let cropBtn = document.getElementById(`blank-custom-img-crop-${idx}`);
-                                    let removeBtn = document.getElementById(`blank-custom-img-remove-${idx}`);
-                                    
-                                    if (!cropBtn && container) {
-                                        cropBtn = document.createElement('button');
-                                        cropBtn.type = 'button';
-                                        cropBtn.id = `blank-custom-img-crop-${idx}`;
-                                        cropBtn.className = 'absolute bottom-1 left-1 w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center shadow-lg active:scale-90 transition-transform hover:bg-blue-600';
-                                        cropBtn.onclick = () => openCustomCropModal(idx);
-                                        cropBtn.title = 'Crop Photo';
-                                        cropBtn.innerHTML = '<i class="fa-solid fa-crop-simple text-[11px]"></i>';
-                                        container.appendChild(cropBtn);
-                                    } else if (cropBtn) {
-                                        cropBtn.classList.remove('hidden');
-                                    }
-            
-                                    if (!removeBtn && container) {
-                                        removeBtn = document.createElement('button');
-                                        removeBtn.type = 'button';
-                                        removeBtn.id = `blank-custom-img-remove-${idx}`;
-                                        removeBtn.className = 'absolute bottom-1 right-1 w-6 h-6 rounded-full bg-rose-500 text-white flex items-center justify-center shadow-lg active:scale-90 transition-transform hover:bg-rose-600';
-                                        removeBtn.onclick = () => removeCustomPhoto(idx);
-                                        removeBtn.title = 'Delete Photo';
-                                        removeBtn.innerHTML = '<i class="fa-solid fa-xmark text-[12px]"></i>';
-                                        container.appendChild(removeBtn);
-                                    } else if (removeBtn) {
-                                        removeBtn.classList.remove('hidden');
-                                    }
-                                    if (typeof renderCurrentRecordsPage === 'function') renderCurrentRecordsPage();
-                                }
-                            } else {
-                                const pMeta = (typeof fb_standard_meta !== 'undefined' ? fb_standard_meta['photo'] : null) || (schoolConfig && schoolConfig.formMeta && schoolConfig.formMeta['photo']) || {};
-                                const cWidth = pMeta.width || 600;
-                                const cHeight = pMeta.height || 800;
-                                const canvas = cropperInstance.getCroppedCanvas({
-                                    width: cWidth,
-                                    height: cHeight,
-                                });
-                                if (canvas) {
-                                    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-                                    photoData = dataUrl;
-                                    showPhotoPreview(photoData);
-                                    if (typeof queueServerDraftSync === 'function') queueServerDraftSync();
-                                    if (typeof renderCurrentRecordsPage === 'function') renderCurrentRecordsPage();
-                                }
-                            }
-                            closeCropModal();
-                        }
+            // --- Cropper helper functions are imported from cropper-helper.js ---
     </script>
     <div id="crop-modal" class="fixed inset-0 bg-black/60 z-[999] hidden items-center justify-center p-4">
         <div class="bg-white rounded-3xl p-6 w-full max-w-md flex flex-col shadow-2xl">

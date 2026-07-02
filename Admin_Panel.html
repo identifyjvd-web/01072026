@@ -80,6 +80,9 @@
     </script>
 
                             <link rel="manifest" href="manifest.json">
+    <script src="db-helper.js"></script>
+    <script src="cropper-helper.js"></script>
+    <script src="card-generator.js"></script>
 </head>
 
 <body class="flex flex-col h-screen">
@@ -529,104 +532,7 @@
             const RECORD_UPDATES_KEY = 'student_updates_v1';
             const FORM_DRAFT_KEY = 'student_draft_v1';
 
-            // --- IndexedDB Wrapper & Offline Queue ---
-            const SchoolLocalDB = {
-                dbName: 'SchoolSystemDB',
-                version: 1,
-                init: function() {
-                    return new Promise((resolve, reject) => {
-                        const request = indexedDB.open(this.dbName, this.version);
-                        request.onupgradeneeded = (e) => {
-                            const idb = e.target.result;
-                            if (!idb.objectStoreNames.contains('store')) {
-                                idb.createObjectStore('store');
-                            }
-                            if (!idb.objectStoreNames.contains('syncQueue')) {
-                                idb.createObjectStore('syncQueue', { keyPath: 'id' });
-                            }
-                        };
-                        request.onsuccess = (e) => resolve(e.target.result);
-                        request.onerror = (e) => reject(e.target.error);
-                    });
-                },
-                get: async function(key) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('store', 'readonly');
-                            const store = tx.objectStore('store');
-                            const req = store.get(key);
-                            req.onsuccess = () => resolve(req.result);
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { return null; }
-                },
-                set: async function(key, val) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('store', 'readwrite');
-                            const store = tx.objectStore('store');
-                            const req = store.put(val, key);
-                            req.onsuccess = () => resolve();
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { console.warn(e); }
-                },
-                enqueueSync: async function(record) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('syncQueue', 'readwrite');
-                            const store = tx.objectStore('syncQueue');
-                            const req = store.put(record);
-                            req.onsuccess = () => resolve();
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { console.warn(e); }
-                },
-                dequeueSync: async function(id) {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('syncQueue', 'readwrite');
-                            const store = tx.objectStore('syncQueue');
-                            const req = store.delete(id);
-                            req.onsuccess = () => resolve();
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { console.warn(e); }
-                },
-                getAllSyncQueue: async function() {
-                    try {
-                        const idb = await this.init();
-                        return await new Promise((resolve, reject) => {
-                            const tx = idb.transaction('syncQueue', 'readonly');
-                            const store = tx.objectStore('syncQueue');
-                            const req = store.getAll();
-                            req.onsuccess = () => resolve(req.result || []);
-                            req.onerror = () => reject(req.error);
-                        });
-                    } catch(e) { return []; }
-                }
-            };
-
-            window.addEventListener('online', async () => {
-                const queue = await SchoolLocalDB.getAllSyncQueue();
-                if (queue.length > 0) {
-                    showToast('<span class="material-symbols-outlined mr-2">cloud_upload</span> Syncing ' + queue.length + ' offline records...');
-                    for (const item of queue) {
-                        serverCallSilent(item.fn, [item.data], async () => {
-                            await SchoolLocalDB.dequeueSync(item.id);
-                            const idx = db.findIndex(x => x.id === item.id);
-                            if (idx > -1) {
-                                db[idx]._syncStatus = 'synced';
-                                if (currentTab === 'records') renderCurrentRecordsPage();
-                            }
-                        });
-                    }
-                }
-            });
+            // --- Local DB helper is imported from db-helper.js ---
             const AUTH_USER_KEY = 'student_auth_v1';
             const CONFIG_KEY = 'school_config_v1';
             const DEMO_RECORDS = [];
@@ -654,173 +560,7 @@
             let fb_draftMode = false;
 
             
-            function serverCall(fn, args, onSuccess, onFailure) {
-                if (fn === 'loginUser') {
-                    const credentials = args[0] || {};
-                    const userId = (credentials.userId || '').toLowerCase();
-                    if (userId.includes('admin') && (credentials.password || '').trim() === '') {
-                        setTimeout(() => onSuccess({ role: 'teacher', name: 'Admin', userId: 'admin', viewMode: 'all' }), 500);
-                        return;
-                    } else if (userId.includes('teacher')) {
-                        setTimeout(() => onSuccess({ role: 'teacher', name: 'Teacher', userId: credentials.userId }), 500);
-                        return;
-                    } else if (userId.includes('admin')) {
-                        setTimeout(() => onFailure({ message: 'Admin login will be linked later.' }), 500);
-                        return;
-                    } else {
-                        setTimeout(() => onSuccess({ role: 'teacher', name: credentials.userId, userId: credentials.userId }), 500);
-                        return;
-                    }
-                }
-                if (window.db && window.firebaseAPI) {
-                    handleFirebaseCall(fn, args, onSuccess, onFailure);
-                } else {
-                    if (fn === 'getRecords') setTimeout(() => onSuccess(typeof mockRecords !== 'undefined' ? mockRecords : []), 500);
-                    else setTimeout(() => onFailure(new Error("Firebase is not initialized or offline")), 500);
-                }
-            }
-            function serverCallSilent(fn, args, onSuccess, onFailure) {
-                if (!navigator.onLine && (fn === 'updateRecord' || fn === 'submitStudentData' || fn === 'addRecord' || fn === 'deleteRecord')) {
-                    const rec = args[0];
-                    if (rec && rec.id) {
-                        SchoolLocalDB.enqueueSync({ id: rec.id, fn: fn, data: rec, timestamp: Date.now() });
-                        if (onSuccess) onSuccess(rec);
-                        return;
-                    }
-                }
-                serverCall(fn, args, onSuccess, (err) => {
-                    if (fn === 'updateRecord' || fn === 'submitStudentData' || fn === 'addRecord' || fn === 'deleteRecord') {
-                        const rec = args[0];
-                        if (rec && rec.id) {
-                            SchoolLocalDB.enqueueSync({ id: rec.id, fn: fn, data: rec, timestamp: Date.now() });
-                            if (onSuccess) onSuccess(rec);
-                            return;
-                        }
-                    }
-                    if (onFailure) onFailure(err);
-                });
-            }
-            async function handleFirebaseCall(fn, args, onSuccess, onFailure) {
-                const { collection, addDoc, getDocs, updateDoc, setDoc, deleteDoc, doc, query, orderBy, onSnapshot } = window.firebaseAPI;
-                try {
-                    if (fn === 'getRecords') {
-                        if (window._recordsUnsubscribe) {
-                            window._recordsUnsubscribe();
-                        }
-                        const q = query(collection(window.db, "records"), orderBy("updatedAt", "desc"));
-                        window._recordsUnsubscribe = onSnapshot(q, (querySnapshot) => {
-                            const records = [];
-                            querySnapshot.forEach((doc) => { records.push({ id: doc.id, ...doc.data() }); });
-                            if (onSuccess) onSuccess(records);
-                        }, (error) => {
-                            console.error("Firebase Snapshot Error:", error);
-                        });
-                    } else if (fn === 'submitStudentData' || fn === 'addRecord') {
-                        const data = args[0];
-                        data.updatedAt = Date.now();
-                        const cleanData = JSON.parse(JSON.stringify(data));
-                        if (cleanData.id && !String(cleanData.id).startsWith('draft_') && !String(cleanData.id).startsWith('TEMP_')) {
-                            const docRef = doc(window.db, "records", String(cleanData.id));
-                            await setDoc(docRef, cleanData);
-                            if (onSuccess) onSuccess(data);
-                        } else {
-                            const docRef = await addDoc(collection(window.db, "records"), cleanData);
-                            data.id = docRef.id;
-                            if (onSuccess) onSuccess(data);
-                        }
-                    } else if (fn === 'updateStudentData' || fn === 'updateRecord') {
-                        const data = args[0];
-                        data.updatedAt = Date.now();
-                        const cleanData = JSON.parse(JSON.stringify(data));
-                        const docRef = doc(window.db, "records", String(cleanData.id));
-                        await setDoc(docRef, cleanData, { merge: true });
-                        
-                        // Delete old document from Firebase if the ID changed (e.g. from draft_ to serial-numbered ID)
-                        if (data.oldId && String(data.oldId) !== String(data.id)) {
-                            try {
-                                const oldDocRef = doc(window.db, "records", String(data.oldId));
-                                await deleteDoc(oldDocRef);
-                                console.log("Deleted old draft document from Firebase:", data.oldId);
-                            } catch(e) {
-                                console.warn("Failed to delete old draft document from Firebase:", e);
-                            }
-                        }
-                        
-                        if (onSuccess) onSuccess(data);
-                    } else if (fn === 'permanentDelete' || fn === 'deleteRecord') {
-                        const id = args[0];
-                        const docRef = doc(window.db, "records", String(id));
-                        await deleteDoc(docRef);
-                        if (onSuccess) onSuccess(true);
-                    } else if (fn === 'deleteAllRecords') {
-                        const q = query(collection(window.db, "records"));
-                        const querySnapshot = await getDocs(q);
-                        const promises = [];
-                        querySnapshot.forEach((document) => {
-                            promises.push(deleteDoc(doc(window.db, "records", document.id)));
-                        });
-                        await Promise.all(promises);
-                        if (onSuccess) onSuccess(true);
-                    } else if (fn === 'saveFormFields') {
-                        const data = args[0];
-                        const docRef = doc(window.db, "system", "formBuilderConfig");
-                        await setDoc(docRef, data);
-                        if (onSuccess) onSuccess();
-                    } else if (fn === 'getFormFields') {
-                        const docRef = doc(window.db, "system", "formBuilderConfig");
-                        const docSnap = await getDoc(docRef);
-                        if (docSnap.exists()) {
-                            if (onSuccess) onSuccess(docSnap.data());
-                        } else {
-                            if (onSuccess) onSuccess(null);
-                        }
-                    } else if (fn === 'generateId') {
-                        const { runTransaction } = window.firebaseAPI;
-                        if (!runTransaction) throw new Error("runTransaction missing");
-                        const localMaxSn = args[0] || 0;
-                        const counterRef = doc(window.db, "config", "snCounter");
-                        try {
-                            const newSn = await runTransaction(window.db, async (transaction) => {
-                                const sfDoc = await transaction.get(counterRef);
-                                let currentSn = 0;
-                                if (sfDoc.exists()) {
-                                    currentSn = sfDoc.data().value || 0;
-                                    if (currentSn > 1000000000) currentSn = 0;
-                                }
-                                const nextSn = Math.max(currentSn, localMaxSn) + 1;
-                                transaction.set(counterRef, { value: nextSn }, { merge: true });
-                                return nextSn;
-                            });
-                            if (onSuccess) onSuccess(newSn);
-                        } catch (e) {
-                            if (onFailure) onFailure(e);
-                        }
-                    } else if (fn === 'uploadRecordDocument') {
-                        const { ref, uploadString, getDownloadURL } = window.firebaseAPI;
-                        if (!window.storage) throw new Error("Firebase Storage is not initialized.");
-                        const payload = args[0];
-                        const storageRef = ref(window.storage, `documents/${payload.fileName}`);
-                        await uploadString(storageRef, payload.base64Data, 'base64', {
-                            contentType: payload.mimeType
-                        });
-                        const downloadURL = await getDownloadURL(storageRef);
-                        if (onSuccess) {
-                            onSuccess({
-                                fileId: payload.fileName,
-                                url: downloadURL,
-                                previewUrl: downloadURL,
-                                mimeType: payload.mimeType,
-                                size: 0
-                            });
-                        }
-                    } else {
-                        if (onSuccess) onSuccess(true);
-                    }
-                } catch (error) {
-                    console.error("Firebase Error:", error);
-                    if (onFailure) onFailure(error);
-                }
-            }
+            // --- Database sync functions are imported from db-helper.js ---
     
             
 
@@ -1276,14 +1016,23 @@
             async function saveAllManageSchoolDetails() {
                 const name = document.getElementById('manage-school-name')?.value || schoolConfig.name || '';
                 const code = document.getElementById('manage-school-code')?.value || schoolConfig.code || '';
-                const address = document.getElementById('manage-school-address')?.value || schoolConfig.address || '';
-                const contactPerson = document.getElementById('manage-school-contact')?.value || schoolConfig.contactPerson || '';
-                const mobile = document.getElementById('manage-school-mobile')?.value || schoolConfig.mobile || '';
-                const email = document.getElementById('manage-school-email')?.value || schoolConfig.email || '';
-                const whatsapp = document.getElementById('manage-school-whatsapp')?.value || schoolConfig.whatsapp || '';
-                const instagram = document.getElementById('manage-school-instagram')?.value || schoolConfig.instagram || '';
-                const youtube = document.getElementById('manage-school-youtube')?.value || schoolConfig.youtube || '';
-                const facebook = document.getElementById('manage-school-facebook')?.value || schoolConfig.facebook || '';
+                const isEditAbout = (blankRecordMode === 'edit_about');
+
+                // Read School Details (Manage School)
+                const schoolAddress = isEditAbout ? (schoolConfig.address || '') : (document.getElementById('manage-school-address')?.value || '');
+                const schoolContact = isEditAbout ? (schoolConfig.contactPerson || '') : (document.getElementById('manage-school-contact')?.value || '');
+                const schoolMobile = isEditAbout ? (schoolConfig.mobile || '') : (document.getElementById('manage-school-mobile')?.value || '');
+                const schoolEmail = isEditAbout ? (schoolConfig.email || '') : (document.getElementById('manage-school-email')?.value || '');
+
+                // Read Admin Details (Edit System About)
+                const adminMobile = isEditAbout ? (document.getElementById('manage-admin-mobile')?.value || '') : (schoolConfig.adminMobile || '');
+                const adminEmail = isEditAbout ? (document.getElementById('manage-admin-email')?.value || '') : (schoolConfig.adminEmail || '');
+                const adminAddress = isEditAbout ? (document.getElementById('manage-admin-address')?.value || '') : (schoolConfig.adminAddress || '');
+                const adminWhatsapp = isEditAbout ? (document.getElementById('manage-admin-whatsapp')?.value || '') : (schoolConfig.adminWhatsapp || '');
+                const adminInstagram = isEditAbout ? (document.getElementById('manage-admin-instagram')?.value || '') : (schoolConfig.adminInstagram || '');
+                const adminYoutube = isEditAbout ? (document.getElementById('manage-admin-youtube')?.value || '') : (schoolConfig.adminYoutube || '');
+                const adminFacebook = isEditAbout ? (document.getElementById('manage-admin-facebook')?.value || '') : (schoolConfig.adminFacebook || '');
+
                 const systemAbout = document.getElementById('manage-system-about')?.value || schoolConfig.systemAbout || schoolConfig.about || '';
 
                 const msgEl = document.getElementById('school-create-msg');
@@ -1298,14 +1047,17 @@
                     ...schoolConfig,
                     name: name,
                     code: code,
-                    address: address,
-                    contactPerson: contactPerson,
-                    mobile: mobile,
-                    email: email,
-                    whatsapp: whatsapp,
-                    instagram: instagram,
-                    youtube: youtube,
-                    facebook: facebook,
+                    address: schoolAddress,
+                    contactPerson: schoolContact,
+                    mobile: schoolMobile,
+                    email: schoolEmail,
+                    adminMobile: adminMobile,
+                    adminEmail: adminEmail,
+                    adminAddress: adminAddress,
+                    adminWhatsapp: adminWhatsapp,
+                    adminInstagram: adminInstagram,
+                    adminYoutube: adminYoutube,
+                    adminFacebook: adminFacebook,
                     systemAbout: systemAbout
                 };
 
@@ -2281,6 +2033,41 @@
                 const codeEl = document.getElementById('config-code'); if (codeEl) codeEl.value = schoolConfig.code;
                 const nameInput = document.getElementById('config-name'); if (nameInput) nameInput.value = schoolConfig.name;
                 const aboutEl = document.getElementById('settings-about-display'); if (aboutEl) aboutEl.innerText = (schoolConfig.systemAbout || schoolConfig.about);
+                
+                // Update School Header Contact Details
+                const schoolContactEl = document.getElementById('settings-school-contact-display');
+                if (schoolContactEl) schoolContactEl.innerText = schoolConfig.contactPerson || 'Contact not set';
+                
+                const schoolAddressEl = document.getElementById('settings-school-address-display');
+                if (schoolAddressEl) schoolAddressEl.innerText = schoolConfig.address || 'Address not set';
+                const schoolAddressLink = document.getElementById('settings-school-address-link');
+                if (schoolAddressLink) schoolAddressLink.href = schoolConfig.address ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.address)}` : '#';
+
+                const schoolMobileEl = document.getElementById('settings-school-mobile-display');
+                if (schoolMobileEl) schoolMobileEl.innerText = schoolConfig.mobile || 'No Mobile';
+                const schoolMobileLink = document.getElementById('settings-school-mobile-link');
+                if (schoolMobileLink) {
+                    if (schoolConfig.mobile) {
+                        schoolMobileLink.href = `tel:${schoolConfig.mobile}`;
+                        schoolMobileLink.style.pointerEvents = 'auto';
+                    } else {
+                        schoolMobileLink.removeAttribute('href');
+                        schoolMobileLink.style.pointerEvents = 'none';
+                    }
+                }
+
+                const schoolEmailEl = document.getElementById('settings-school-email-display');
+                if (schoolEmailEl) schoolEmailEl.innerText = schoolConfig.email || 'No Email';
+                const schoolEmailLink = document.getElementById('settings-school-email-link');
+                if (schoolEmailLink) {
+                    if (schoolConfig.email) {
+                        schoolEmailLink.href = `mailto:${schoolConfig.email}`;
+                        schoolEmailLink.style.pointerEvents = 'auto';
+                    } else {
+                        schoolEmailLink.removeAttribute('href');
+                        schoolEmailLink.style.pointerEvents = 'none';
+                    }
+                }
                 document.title = "IDentify-" + (schoolConfig.code || "DPS");
 
                 if (schoolConfig.logo) {
@@ -3192,7 +2979,7 @@
 
                 const nextSn = nowTs;
                 lastFetchedSn = nextSn;
-                const structuredId = `draft_${schoolCode}-${nextSn}`;
+                const structuredId = `draft_${schoolCode}-${nextSn}-${Math.floor(Math.random() * 10000)}`;
                 draftServerRecordId = structuredId;
                 
                 const reservationPayload = {
@@ -5032,88 +4819,7 @@
                 }, 'Yes, Send');
             }
 
-            async function bulkDownloadSelectedJpg() {
-                if (selectedRecords.size === 0) return;
-                
-                const count = selectedRecords.size;
-                const btn = document.getElementById('btn-bulk-download-jpg');
-                const origHtml = btn ? btn.innerHTML : '';
-                if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-[16px]"></i>';
-                
-                const origMode = blankRecordMode;
-                const origPreview = previewRecord;
-                
-                const overlay = document.createElement('div');
-                overlay.style.position = 'fixed';
-                overlay.style.top = '0'; overlay.style.left = '0'; overlay.style.width = '100vw'; overlay.style.height = '100vh';
-                overlay.style.backgroundColor = 'rgba(15, 23, 42, 0.95)';
-                overlay.style.zIndex = '999999';
-                overlay.style.display = 'flex'; overlay.style.flexDirection = 'column'; overlay.style.alignItems = 'center'; overlay.style.justifyContent = 'center'; overlay.style.color = 'white';
-                overlay.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-5xl mb-6 text-amber-500"></i><div id="bulk-jpg-progress" class="text-2xl font-black tracking-widest uppercase">Generating 0 / ' + count + '</div><div class="text-sm text-slate-400 mt-2">Please do not close this window</div>';
-                document.body.appendChild(overlay);
-
-                try {
-                    const zip = new JSZip();
-                    const folder = zip.folder("ID_Cards_JPG");
-                    let doneCount = 0;
-                    
-                    const recordsToExport = [];
-                    selectedRecords.forEach(id => {
-                        const rec = db.find(x => String(x.id) === String(id));
-                        if (rec) recordsToExport.push(rec);
-                    });
-
-                    for (let i = 0; i < recordsToExport.length; i++) {
-                        const rec = recordsToExport[i];
-                        doneCount++;
-                        document.getElementById('bulk-jpg-progress').innerText = `Generating ${doneCount} / ${count}`;
-                        
-                        previewRecord = rec;
-                        setBlankRecordMode('preview'); 
-                        
-                        // Wait for render and images to load
-                        await new Promise(res => setTimeout(res, 400));
-                        
-                        const card = document.querySelector('.preview-dark-card');
-                        if (card) {
-                            const actionBars = card.querySelectorAll('.preview-action-bar');
-                            actionBars.forEach(bar => bar.style.display = 'none');
-                            
-                            const dynamicScale = window.innerWidth < 768 ? 1 : 2;
-                            const canvas = await html2canvas(card, { scale: dynamicScale, useCORS: true, backgroundColor: '#1e293b' });
-                            
-                            actionBars.forEach(bar => bar.style.display = '');
-                            
-                            const imgData = canvas.toDataURL('image/jpeg', 0.95);
-                            const sn = rec.sn ? rec.sn : 'Unknown';
-                            const safeName = (rec.studentName || rec.name || 'Unknown').replace(/[^a-zA-Z0-9\s]/g, '_').trim();
-                            folder.file(`ID_Card_${sn}_${safeName}.jpg`, imgData.split(',')[1], {base64: true});
-                        }
-                    }
-                    
-                    document.getElementById('bulk-jpg-progress').innerText = "Zipping Files...";
-                    const content = await zip.generateAsync({type:"blob"});
-                    const downloadLink = document.createElement("a");
-                    downloadLink.href = URL.createObjectURL(content);
-                    downloadLink.download = `ID_Cards_${new Date().toISOString().split('T')[0]}.zip`;
-                    document.body.appendChild(downloadLink);
-                    downloadLink.click();
-                    document.body.removeChild(downloadLink);
-                    
-                    showToast("Downloaded Successfully!");
-                } catch (e) {
-                    console.error("Bulk JPG Error:", e);
-                    showToast("Error generating JPGs", true);
-                } finally {
-                    if (btn) btn.innerHTML = origHtml;
-                    document.body.removeChild(overlay);
-                    previewRecord = origPreview;
-                    setBlankRecordMode(origMode);
-                    if (origMode === 'none') {
-                        renderCurrentRecordsPage();
-                    }
-                }
-            }
+            // --- bulkDownloadSelectedJpg is imported from card-generator.js ---
 
             async function bulkExportSelected() {
                 if (selectedRecords.size === 0) return;
@@ -5926,11 +5632,47 @@
                     if (blankRecordMode === 'settings') {
                         t.innerHTML = `
                 <div class="p-6 bg-white rounded-3xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 system-card">
-                    <div class="text-center pb-2">
-                        <div class="w-24 h-24 rounded-3xl bg-emerald-50 mx-auto flex items-center justify-center mb-4 border-2 border-emerald-100 shadow-sm relative overflow-hidden">
+                    <div class="flex items-stretch gap-4 text-left pb-2">
+                        <div onclick="openImagePreviewModal(schoolConfig ? schoolConfig.logo : null)" class="w-24 h-24 rounded-3xl bg-emerald-50 flex items-center justify-center border-2 border-emerald-100 shadow-sm relative overflow-hidden shrink-0 cursor-pointer hover:scale-105 active:scale-95 transition-transform" title="Tap to Zoom Logo">
                             ${schoolConfig.logo ? `<img src="${schoolConfig.logo}" class="w-full h-full object-cover">` : `<i class="fa-solid fa-school-flag text-5xl text-emerald-600"></i>`}
                         </div>
-                        <h3 class="text-xl font-black text-slate-800 mb-1">${schoolConfig.name || 'School Name'}</h3>
+                        <div class="flex flex-col justify-between py-1 min-w-0 flex-1 h-24">
+                            <!-- School Name (slightly larger) -->
+                            <h3 class="text-[15px] font-black text-slate-800 truncate leading-tight">${schoolConfig.name || 'School Name'}</h3>
+                            
+                            <!-- Address (immediately under School Name, same text size) -->
+                            <div class="text-[10px] text-slate-700 font-extrabold leading-normal truncate">
+                                <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.address || '')}" target="_blank" class="hover:underline hover:text-emerald-700 transition-colors">
+                                    <i class="fa-solid fa-location-dot text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.address || 'Address not set'}
+                                </a>
+                            </div>
+
+                            <!-- Contact Person & Mobile (inline, same text size) -->
+                            <div class="text-[10px] text-slate-700 font-extrabold leading-normal truncate flex items-center gap-1.5">
+                                <span class="truncate"><i class="fa-solid fa-user-tie text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.contactPerson || 'Contact not set'}</span>
+                                <span class="text-slate-400">•</span>
+                                <span class="text-slate-800 font-black tracking-wider uppercase shrink-0">
+                                    ${schoolConfig.mobile ? `
+                                        <a href="tel:${schoolConfig.mobile}" class="hover:underline hover:text-emerald-700 transition-colors">
+                                            <i class="fa-solid fa-phone text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.mobile}
+                                        </a>
+                                    ` : `
+                                        <i class="fa-solid fa-phone text-emerald-600 mr-1 text-[9px]"></i>No Mobile
+                                    `}
+                                </span>
+                            </div>
+
+                            <!-- Email (same text size) -->
+                            <div class="text-[10px] text-slate-800 font-black tracking-wider uppercase truncate">
+                                ${schoolConfig.email ? `
+                                    <a href="mailto:${schoolConfig.email}" class="hover:underline hover:text-emerald-700 transition-colors">
+                                        <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[9px]"></i>${schoolConfig.email}
+                                    </a>
+                                ` : `
+                                    <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[9px]"></i>No Email
+                                `}
+                            </div>
+                        </div>
                     </div>
 
                     <div class="space-y-3">
@@ -6148,39 +5890,39 @@
                                         <div class="flex-1 space-y-2">
                                             <div>
                                                 <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-solid fa-phone"></i> Admin Mobile No</label>
-                                                <input type="text" id="manage-school-mobile" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Phone" value="${schoolConfig.mobile || ''}">
+                                                <input type="text" id="manage-admin-mobile" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Phone" value="${schoolConfig.adminMobile || ''}">
                                             </div>
                                             <div>
                                                 <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-solid fa-envelope"></i> Admin Email</label>
-                                                <input type="email" id="manage-school-email" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin Email" value="${schoolConfig.email || ''}">
+                                                <input type="email" id="manage-admin-email" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin Email" value="${schoolConfig.adminEmail || ''}">
                                             </div>
                                         </div>
                                     </div>
 
                                     <div>
                                         <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-solid fa-map-location-dot"></i> Admin Address</label>
-                                        <input type="text" id="manage-school-address" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Full address" value="${schoolConfig.address || ''}">
+                                        <input type="text" id="manage-admin-address" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Full address" value="${schoolConfig.adminAddress || ''}">
                                     </div>
 
                                     <div>
                                         <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-brands fa-whatsapp"></i> Admin WhatsApp No</label>
-                                        <input type="text" id="manage-school-whatsapp" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Enter number" value="${schoolConfig.whatsapp || ''}">
+                                        <input type="text" id="manage-admin-whatsapp" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Enter number" value="${schoolConfig.adminWhatsapp || ''}">
                                     </div>
 
                                     <div class="space-y-3 w-full">
                                         <div>
                                             <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-brands fa-instagram"></i> Admin Instagram</label>
-                                            <input type="text" id="manage-school-instagram" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin Instagram URL" value="${schoolConfig.instagram || ''}">
+                                            <input type="text" id="manage-admin-instagram" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin Instagram URL" value="${schoolConfig.adminInstagram || ''}">
                                         </div>
                                         <div>
                                             <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-brands fa-youtube"></i> Admin YouTube</label>
-                                            <input type="text" id="manage-school-youtube" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin YouTube URL" value="${schoolConfig.youtube || ''}">
+                                            <input type="text" id="manage-admin-youtube" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin YouTube URL" value="${schoolConfig.adminYoutube || ''}">
                                         </div>
                                     </div>
 
                                     <div>
                                         <label class="premium-label !text-[11px] !tracking-widest uppercase"><i class="fa-brands fa-facebook-f"></i> Admin Facebook</label>
-                                        <input type="text" id="manage-school-facebook" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin Facebook URL" value="${schoolConfig.facebook || ''}">
+                                        <input type="text" id="manage-admin-facebook" class="w-full rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm font-bold text-slate-700 outline-none focus:border-emerald-400 transition" placeholder="Admin Facebook URL" value="${schoolConfig.adminFacebook || ''}">
                                     </div>
 
                                     <div>
@@ -7278,8 +7020,10 @@
                     try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, db[idxSync]).catch(()=>{}); } catch(e){}
                 }
                 
+                filterRecords();
+                
                 const currentIdNew = localRec.id;
-                const pendingList = db.filter(x => !hasRecordDocument(x) && x.id !== currentIdNew);
+                const pendingList = db.filter(x => !hasRecordDocument(x) && x.verified !== true && x.isDeleted !== true && x.id !== currentIdNew);
 
                 if (pendingList.length > 0) {
                     isPendingBatch = true;
@@ -7369,7 +7113,7 @@
                 if (isPendingBatch) {
                     const currentId = previewRecord ? previewRecord.id : null;
                     // Find records without documents, excluding the one we just processed
-                    const pendingList = db.filter(x => !hasRecordDocument(x) && x.id !== currentId);
+                    const pendingList = db.filter(x => !hasRecordDocument(x) && x.verified !== true && x.isDeleted !== true && x.id !== currentId);
 
                     if (pendingList.length > 0) {
                         // Show preview of the next one
@@ -7592,46 +7336,7 @@
             let _previewLpTimer = null;
             let _previewLpDidTrigger = false;
 
-            function downloadPreviewCardAsJpg() {
-                const card = document.querySelector('.preview-dark-card');
-                if (!card) return;
-                
-                showToast("Generating JPG...");
-                if (navigator.vibrate) navigator.vibrate([50, 50, 50]);
-                
-                // Hide the navigation buttons temporarily so they don't appear in the image
-                const navButtons = document.querySelectorAll('.fixed.top-\\[100px\\]');
-                navButtons.forEach(btn => btn.style.display = 'none');
-                
-                // Hide the preview action buttons
-                const actionBars = document.querySelectorAll('.preview-action-bar');
-                actionBars.forEach(bar => bar.style.display = 'none');
-                
-                const dynamicScale = window.innerWidth < 768 ? 1 : 2;
-                html2canvas(card, {
-                    scale: dynamicScale, // High resolution for desktop, 1x for mobile to prevent memory crash
-                    useCORS: true,
-                    backgroundColor: '#1e293b' // match dark card background
-                }).then(canvas => {
-                    navButtons.forEach(btn => btn.style.display = '');
-                    actionBars.forEach(bar => bar.style.display = '');
-                    
-                    const imgData = canvas.toDataURL('image/jpeg', 0.95);
-                    const link = document.createElement('a');
-                    link.href = imgData;
-                    const sn = previewRecord ? previewRecord.sn : 'Unknown';
-                    link.download = `ID_Card_${sn}.jpg`;
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                    showToast("Downloaded Successfully!");
-                }).catch(err => {
-                    navButtons.forEach(btn => btn.style.display = '');
-                    actionBars.forEach(bar => bar.style.display = '');
-                    console.error(err);
-                    showToast("Error generating JPG");
-                });
-            }
+            // --- downloadPreviewCardAsJpg is imported from card-generator.js ---
 
             function handlePreviewTouchStart(e) {
                 _previewLpDidTrigger = false;
@@ -7763,6 +7468,45 @@
                     overlay.classList.add('hidden');
                     overlay.classList.remove('flex');
                 }
+            }
+
+            function openImagePreviewModal(src) {
+                if (!src) return;
+                const modal = document.createElement('div');
+                modal.id = 'image-zoom-modal';
+                modal.className = 'fixed inset-0 bg-black/85 backdrop-blur-md z-[99999] flex items-center justify-center p-4 animate-in fade-in duration-200';
+                modal.onclick = () => closeModal();
+
+                const container = document.createElement('div');
+                container.className = 'relative max-w-full max-h-[85vh] flex items-center justify-center transform scale-90 opacity-0 transition-all duration-300 ease-out';
+                requestAnimationFrame(() => {
+                    container.classList.remove('scale-90', 'opacity-0');
+                    container.classList.add('scale-100', 'opacity-100');
+                });
+
+                const img = document.createElement('img');
+                img.src = src;
+                img.className = 'max-w-full max-h-[85vh] rounded-2xl shadow-2xl object-contain border-2 border-white/10';
+                img.onclick = (e) => e.stopPropagation();
+
+                const closeBtn = document.createElement('button');
+                closeBtn.innerHTML = '<i class="fa-solid fa-xmark text-lg"></i>';
+                closeBtn.className = 'absolute -top-3 -right-3 w-10 h-10 rounded-full bg-white text-slate-800 shadow-xl flex items-center justify-center active:scale-90 hover:bg-slate-100 transition-all z-50 border border-slate-200';
+                closeBtn.onclick = closeModal;
+
+                function closeModal() {
+                    modal.classList.add('fade-out');
+                    container.classList.remove('scale-100', 'opacity-100');
+                    container.classList.add('scale-90', 'opacity-0');
+                    setTimeout(() => {
+                        modal.remove();
+                    }, 250);
+                }
+
+                container.appendChild(img);
+                container.appendChild(closeBtn);
+                modal.appendChild(container);
+                document.body.appendChild(modal);
             }
 
             // --- HOME CARD EXPAND/COLLAPSE ---
@@ -8000,15 +7744,41 @@
                     class="absolute top-5 right-6 w-9 h-9 rounded-full bg-slate-100/50 hover:bg-rose-50 hover:text-rose-500 flex items-center justify-center text-slate-500 transition active:scale-90 z-20">
                     <i class="fa-solid fa-xmark text-sm"></i>
                 </button>
-                <div class="px-8 pt-10 pb-6 text-center">
-                    <div id="settings-logo-container"
-                        class="w-20 h-20 rounded-3xl bg-emerald-50 mx-auto flex items-center justify-center mb-4 border-2 border-emerald-100 overflow-hidden">
-                        <i class="fa-solid fa-school-flag text-4xl text-emerald-600"></i>
+                <div class="px-8 pt-10 pb-6 flex items-stretch gap-4 text-left">
+                    <div id="settings-logo-container" onclick="openImagePreviewModal(schoolConfig ? schoolConfig.logo : null)"
+                        class="w-20 h-20 rounded-3xl bg-emerald-50 flex items-center justify-center border-2 border-emerald-100 overflow-hidden shrink-0 shadow-sm cursor-pointer hover:scale-105 active:scale-95 transition-transform" title="Tap to Zoom Logo">
+                        <i class="fa-solid fa-school-flag text-3xl text-emerald-600"></i>
                     </div>
-                    <h3 id="settings-school-name-display" class="text-xl font-black text-slate-800 mb-1">School Name
-                    </h3>
-                    <p id="settings-about-display" class="text-xs text-slate-400 font-bold uppercase tracking-widest">
-                        About School Info</p>
+                    <div class="flex flex-col justify-between py-0.5 min-w-0 flex-1 h-20">
+                        <!-- School Name (larger) -->
+                        <h3 id="settings-school-name-display" class="text-sm font-black text-slate-800 truncate leading-tight">School Name</h3>
+                        
+                        <!-- Address (immediately under School Name, same text size) -->
+                        <div class="text-[9.5px] text-slate-700 font-extrabold leading-tight truncate">
+                            <a id="settings-school-address-link" href="#" target="_blank" class="hover:underline hover:text-emerald-700 transition-colors">
+                                <i class="fa-solid fa-location-dot text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-address-display">--</span>
+                            </a>
+                        </div>
+
+                        <!-- Contact & Mobile (inline, same text size) -->
+                        <div class="text-[9.5px] text-slate-700 font-extrabold leading-tight truncate flex items-center gap-1.5">
+                            <span class="truncate"><i class="fa-solid fa-user-tie text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-contact-display">--</span></span>
+                            <span class="text-slate-400">•</span>
+                            <span class="text-slate-800 font-black tracking-wider uppercase shrink-0">
+                                <a id="settings-school-mobile-link" href="#" class="hover:underline hover:text-emerald-700 transition-colors">
+                                    <i class="fa-solid fa-phone text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-mobile-display">--</span>
+                                </a>
+                            </span>
+                        </div>
+
+                        <!-- Email (same text size) -->
+                        <div class="text-[9.5px] text-slate-800 font-black tracking-wider uppercase truncate">
+                            <a id="settings-school-email-link" href="#" class="hover:underline hover:text-emerald-700 transition-colors">
+                                <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-email-display">--</span>
+                            </a>
+                        </div>
+                    </div>
+                    <div id="settings-about-display" class="hidden"></div>
                 </div>
 
                 <div class="px-8 space-y-5 flex-1 overflow-y-auto custom-scroll system-scroll pb-10">
@@ -8581,6 +8351,7 @@
                     </div>
                     ${isEditing ? fb_getEditorHtml() : `
                     <div class="flex items-center justify-end gap-2 border-t border-slate-50 pt-3">
+                        <div class="mr-auto w-7 h-7 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center font-black text-[11px] border border-emerald-200/50" title="Field Position">${renderedCount + 1}</div>
                         ${qrEnabled && effectiveType !== 'image' && field.id !== 'photo' && effectiveType !== 'section' ? `
                         <button onclick="fb_toggleFieldQr('${field.id}')" class="w-9 h-9 rounded-full border-2 transition active:scale-95 hover:shadow-sm ${qrFields.includes(field.id) ? 'border-emerald-500 bg-emerald-50 text-emerald-600' : 'border-slate-200 text-slate-400 bg-slate-50 hover:bg-emerald-50 hover:text-emerald-500 hover:border-emerald-200'}" title="Include in QR Code">
                             <i class="fa-solid fa-qrcode text-[11px]"></i>
@@ -8632,6 +8403,7 @@
                         </div>
                         ${isEditing ? fb_getEditorHtml() : `
                         <div class="mt-4 flex items-center justify-end gap-2 border-t border-slate-50 pt-3">
+                            <div class="mr-auto w-7 h-7 rounded-lg bg-emerald-50 text-emerald-700 flex items-center justify-center font-black text-[11px] border border-emerald-200/50" title="Field Position">${renderedCount + 1}</div>
                             ${qrEnabled && field.type !== 'image' && field.type !== 'section' ? `
                             <button onclick="fb_toggleFieldQr('${field.id}')" class="w-9 h-9 rounded-full border-2 transition active:scale-95 hover:shadow-sm ${qrFields.includes(field.id) ? 'border-emerald-500 bg-emerald-50 text-emerald-600' : 'border-slate-200 text-slate-400 bg-slate-50 hover:bg-emerald-50 hover:text-emerald-500 hover:border-emerald-200'}" title="Include in QR Code">
                                 <i class="fa-solid fa-qrcode text-[11px]"></i>
@@ -9176,6 +8948,16 @@
             const idx = fb_removed.findIndex(f => String(f.id) === String(id));
             if (idx === -1) return;
             const item = fb_removed[idx];
+            
+            // Move/append restored field ID to the end of fb_form_order
+            if (Array.isArray(fb_form_order)) {
+                const orderIdx = fb_form_order.indexOf(id);
+                if (orderIdx !== -1) {
+                    fb_form_order.splice(orderIdx, 1);
+                }
+                fb_form_order.push(id);
+            }
+
             if (item.__source === 'standard') {
                 if (!(item.id in fb_standard_config)) fb_standard_config[item.id] = { enabled: true, required: false };
                 fb_standard_config[item.id].enabled = true;
@@ -9301,143 +9083,7 @@
                 }, 1000);
             });
         }
-            let cropperInstance = null;
-                        let currentlyCroppingCustomIdx = null; // 1-indexed (1 to 5) or null for student photo
-            
-                        function openCropModal() {
-                            currentlyCroppingCustomIdx = null;
-                            const img = document.getElementById('blank-photo-preview-img');
-                            if (!img || !img.src) return;
-            
-                            const modal = document.getElementById('crop-modal');
-                            const cropImg = document.getElementById('crop-modal-img');
-            
-                            cropImg.src = img.src;
-                            modal.classList.remove('hidden');
-                            modal.classList.add('flex');
-            
-                            const pMeta = (typeof fb_standard_meta !== 'undefined' ? fb_standard_meta['photo'] : null) || (schoolConfig && schoolConfig.formMeta && schoolConfig.formMeta['photo']) || {};
-                            const cWidth = pMeta.width || 600;
-                            const cHeight = pMeta.height || 800;
-            
-                            if (cropperInstance) { cropperInstance.destroy(); }
-                            cropperInstance = new Cropper(cropImg, {
-                                aspectRatio: cWidth / cHeight,
-                                viewMode: 1,
-                                autoCropArea: 1,
-                            });
-                        }
-            
-                        function openCustomCropModal(idx) {
-                            currentlyCroppingCustomIdx = idx;
-                            const img = document.getElementById(`blank-custom-img-preview-${idx}`);
-                            if (!img || !img.src) return;
-            
-                            const modal = document.getElementById('crop-modal');
-                            const cropImg = document.getElementById('crop-modal-img');
-            
-                            cropImg.src = img.src;
-                            modal.classList.remove('hidden');
-                            modal.classList.add('flex');
-            
-                            const field = fb_fields[idx - 1];
-                            const imgWidth = field.width || 600;
-                            const imgHeight = field.height || 800;
-            
-                            if (cropperInstance) { cropperInstance.destroy(); }
-                            cropperInstance = new Cropper(cropImg, {
-                                aspectRatio: imgWidth / imgHeight,
-                                viewMode: 1,
-                                autoCropArea: 1,
-                            });
-                        }
-            
-                        function closeCropModal() {
-                            const modal = document.getElementById('crop-modal');
-                            if (modal) {
-                                modal.classList.add('hidden');
-                                modal.classList.remove('flex');
-                            }
-                            currentlyCroppingCustomIdx = null;
-                            if (cropperInstance) { cropperInstance.destroy(); cropperInstance = null; }
-                        }
-            
-                        function applyCrop() {
-                            if (!cropperInstance) return;
-                            
-                            if (currentlyCroppingCustomIdx !== null) {
-                                const idx = currentlyCroppingCustomIdx;
-                                const field = fb_fields[idx - 1];
-                                const imgWidth = field.width || 600;
-                                const imgHeight = field.height || 800;
-                                const canvas = cropperInstance.getCroppedCanvas({
-                                    width: imgWidth,
-                                    height: imgHeight,
-                                });
-                                if (canvas) {
-                                    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-                                    syncBlankField(`in-customField${idx}`, dataUrl);
-                                    
-                                    const previewImg = document.getElementById(`blank-custom-img-preview-${idx}`);
-                                    const placeholder = document.getElementById(`blank-custom-img-placeholder-${idx}`);
-                                    const container = document.getElementById(`blank-custom-img-container-${idx}`);
-                                    
-                                    if (previewImg) {
-                                        previewImg.src = dataUrl;
-                                        previewImg.classList.remove('hidden');
-                                    }
-                                    if (placeholder) {
-                                        placeholder.classList.add('hidden');
-                                    }
-                                    
-                                    let cropBtn = document.getElementById(`blank-custom-img-crop-${idx}`);
-                                    let removeBtn = document.getElementById(`blank-custom-img-remove-${idx}`);
-                                    
-                                    if (!cropBtn && container) {
-                                        cropBtn = document.createElement('button');
-                                        cropBtn.type = 'button';
-                                        cropBtn.id = `blank-custom-img-crop-${idx}`;
-                                        cropBtn.className = 'absolute bottom-1 left-1 w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center shadow-lg active:scale-90 transition-transform hover:bg-blue-600';
-                                        cropBtn.onclick = () => openCustomCropModal(idx);
-                                        cropBtn.title = 'Crop Photo';
-                                        cropBtn.innerHTML = '<i class="fa-solid fa-crop-simple text-[11px]"></i>';
-                                        container.appendChild(cropBtn);
-                                    } else if (cropBtn) {
-                                        cropBtn.classList.remove('hidden');
-                                    }
-            
-                                    if (!removeBtn && container) {
-                                        removeBtn = document.createElement('button');
-                                        removeBtn.type = 'button';
-                                        removeBtn.id = `blank-custom-img-remove-${idx}`;
-                                        removeBtn.className = 'absolute bottom-1 right-1 w-6 h-6 rounded-full bg-rose-500 text-white flex items-center justify-center shadow-lg active:scale-90 transition-transform hover:bg-rose-600';
-                                        removeBtn.onclick = () => removeCustomPhoto(idx);
-                                        removeBtn.title = 'Delete Photo';
-                                        removeBtn.innerHTML = '<i class="fa-solid fa-xmark text-[12px]"></i>';
-                                        container.appendChild(removeBtn);
-                                    } else if (removeBtn) {
-                                        removeBtn.classList.remove('hidden');
-                                    }
-                                    if (typeof renderCurrentRecordsPage === 'function') renderCurrentRecordsPage();
-                                }
-                            } else {
-                                const pMeta = (typeof fb_standard_meta !== 'undefined' ? fb_standard_meta['photo'] : null) || (schoolConfig && schoolConfig.formMeta && schoolConfig.formMeta['photo']) || {};
-                                const cWidth = pMeta.width || 600;
-                                const cHeight = pMeta.height || 800;
-                                const canvas = cropperInstance.getCroppedCanvas({
-                                    width: cWidth,
-                                    height: cHeight,
-                                });
-                                if (canvas) {
-                                    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-                                    photoData = dataUrl;
-                                    showPhotoPreview(photoData);
-                                    if (typeof queueServerDraftSync === 'function') queueServerDraftSync();
-                                    if (typeof renderCurrentRecordsPage === 'function') renderCurrentRecordsPage();
-                                }
-                            }
-                            closeCropModal();
-                        }
+            // --- Cropper helper functions are imported from cropper-helper.js ---
     </script>
     <div id="crop-modal" class="fixed inset-0 bg-black/60 z-[999] hidden items-center justify-center p-4">
         <div class="bg-white rounded-3xl p-6 w-full max-w-md flex flex-col shadow-2xl">
