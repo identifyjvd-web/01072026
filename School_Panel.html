@@ -2135,13 +2135,19 @@
                             }
                         });
                         SchoolLocalDB.get('local_unverified').then(localUnverified => {
-                            if (localUnverified && Array.isArray(localUnverified)) {
-                                localUnverified.forEach(uRec => {
-                                    if (!mergedDb.some(m => String(m.id) === String(uRec.id) || (m.oldId && String(m.oldId) === String(uRec.id)))) {
-                                        mergedDb.push(uRec);
-                                    }
-                                });
+                            // We purposefully do NOT push localUnverified into mergedDb here,
+                            // because if they don't exist on the server and aren't locally pending,
+                            // they were deleted by the admin!
+                            
+                            // If server has 0 records (Admin wiped data), clear local pending cache to be safe
+                            if (serverFiltered.length === 0 && mergedDb.length > 0) {
+                                // Only keep strictly pending local ones, or wipe entirely?
+                                // If admin deleted all, we'll assume a fresh slate.
+                                // Actually, mergedDb currently only has pendingLocal. We will keep pendingLocal 
+                                // just in case they added it offline recently, but if serverDb is empty and there are issues, 
+                                // the next persistLocalUnverified will overwrite local_unverified anyway.
                             }
+
                             db = mergedDb;
                             demoFallbackLoaded = false;
                             refreshUiAfterLoad();
@@ -2288,6 +2294,7 @@
                                 db = [];
                                 try { localStorage.removeItem('deleted_record_ids'); } catch(e){}
                                 try { if (window.idbClear) idbClear('records').catch(()=>{}); } catch(e){}
+                                try { if (typeof SchoolLocalDB !== 'undefined') SchoolLocalDB.remove('local_unverified'); } catch(e){}
                                 if (typeof renderHomeAnalysis === 'function') renderHomeAnalysis();
                                 if (typeof filterRecords === 'function') filterRecords();
                                 if (typeof setBlankRecordMode === 'function') setBlankRecordMode('none');
@@ -3036,6 +3043,13 @@
                 if (!filterRow || !icon || !btn || !search || !searchIcon || !info) return;
 
                 closeAllMenus();
+                
+                let didFilterChange = false;
+                if (mode === 'none' && blankRecordMode === 'recycleBin' && typeof activeStatusFilter !== 'undefined') {
+                    activeStatusFilter = 'all';
+                    didFilterChange = true;
+                }
+                
                 blankRecordMode = mode;
                 showBlankRecordCard = mode !== 'none';
 
@@ -3175,7 +3189,11 @@
                     if (altInfo) altInfo.classList.add('hidden');
                 }
 
-                renderCurrentRecordsPage();
+                if (typeof didFilterChange !== 'undefined' && didFilterChange && typeof filterRecords === 'function') {
+                    filterRecords();
+                } else {
+                    renderCurrentRecordsPage();
+                }
             }
             let lastFetchedSn = null;
             let currentUserLocation = "Not Provided";
@@ -3559,6 +3577,8 @@
                                 const year = new Date(r.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                 return si + year + String(snVal).padStart(3, '0');
                             } else {
+                                const isImported = r.imported === true || (r.id && String(r.id).startsWith('TEMP_')) || (r.id && String(r.id).startsWith('draft_') && !String(r.id).includes('-'));
+                                if (isImported) return si + 'Import' + String(r.createdAt || Date.now()).slice(-3);
                                 return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
                             }
                         })(),
@@ -3601,6 +3621,7 @@
                         const getVal = (k) => row[k] || row[Object.keys(row).find(key => key && key.toLowerCase().includes(k.toLowerCase()))] || '';
                         const rec = {
                             id: getVal('Id No') || getVal('id') || `TEMP_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+                            imported: true,
                             sn: getVal('Sn') || '',
                             studentName: getVal('Student Name') || getVal('Student_Name') || getVal('Name'),
                             fatherName: getVal('Father Name') || getVal('Father_Name') || getVal('Father'),
@@ -5963,6 +5984,8 @@
                                             const year = new Date(rec.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                             return si + year + String(snVal).padStart(3, '0');
                                         } else {
+                                            const isImported = rec.imported === true || (rec.id && String(rec.id).startsWith('TEMP_')) || (rec.id && String(rec.id).startsWith('draft_') && !String(rec.id).includes('-'));
+                                            if (isImported) return si + 'Import' + String(rec.createdAt || Date.now()).slice(-3);
                                             return si + 'Draft' + String(rec.createdAt || Date.now()).slice(-3);
                                         }
                                     })() }</div>
@@ -6183,7 +6206,7 @@
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-envelope"></i></div>
                                 <div>Email ID</div>
                                 <div>:</div>
-                                <div class="break-all"><a href="mailto:${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}" class="text-indigo-600 hover:underline">${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}</a></div>
+                                <div class="break-all"><a href="mailto:${(schoolConfig.adminEmail || 'identify.jvd@gmail.com').toLowerCase()}" class="text-indigo-600 hover:underline lowercase">${(schoolConfig.adminEmail || 'identify.jvd@gmail.com').toLowerCase()}</a></div>
                                 
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-location-dot"></i></div>
                                 <div>Address</div>
@@ -6199,7 +6222,7 @@
                                 <a href="${schoolConfig.adminWhatsapp ? `https://wa.me/91${String(schoolConfig.adminWhatsapp).replace(/\D/g,'')}` : (schoolConfig.adminMobile ? `https://wa.me/91${String(schoolConfig.adminMobile).replace(/\D/g,'')}` : 'https://wa.me/917999565002')}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-green-100 text-green-700 flex items-center justify-center hover:bg-green-200 transition-all" title="WhatsApp">
                                     <i class="fa-brands fa-whatsapp"></i>
                                 </a>
-                                <a href="mailto:${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}" class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center hover:bg-slate-200 transition-all" title="Email">
+                                <a href="mailto:${(schoolConfig.adminEmail || 'identify.jvd@gmail.com').toLowerCase()}" class="w-9 h-9 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center hover:bg-slate-200 transition-all" title="Email">
                                     <i class="fa-solid fa-envelope"></i>
                                 </a>
                                 <a href="${schoolConfig.adminYoutube || 'https://www.youtube.com/'}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-red-100 text-red-700 flex items-center justify-center hover:bg-red-200 transition-all" title="YouTube">
@@ -7631,24 +7654,26 @@
                 showModal('success', modalTitle, '', () => {
                     const currentRec = previewRecord;
                     isPreviewFromSave = false;
+                    const wasPendingBatch = isPendingBatch;
                     isPendingBatch = false;
-                    resetForm(true); 
                     
-                    if (currentRec) {
+                    if (currentRec && wasPendingBatch) {
+                        resetForm(true);
                         previewRecord = currentRec;
                         const list = (currentRenderedRecords && currentRenderedRecords.length > 0 && currentRenderedRecords.findIndex(r => r.id === previewRecord.id) !== -1) ? currentRenderedRecords : db;
                         const currentIndex = list.findIndex(r => r.id === previewRecord.id);
                         if (currentIndex >= 0 && currentIndex < list.length - 1) {
-                            openStudentDetailPopup(list[currentIndex + 1], false, isPendingBatch);
+                            openStudentDetailPopup(list[currentIndex + 1], false, true);
                             return;
                         } else {
                             showToast("You have reached the end.");
                         }
+                        previewRecord = null;
+                        closeStudentForm(); 
+                    } else {
+                        resetForm(false);
                     }
-                    
-                    previewRecord = null;
-                    closeStudentForm(); 
-                }, 'Yes, Delete', `${studentName}'s Data`);
+                }, 'OK');
             }
 
             function syncDatabase() {
@@ -9833,6 +9858,7 @@
                 }
                 
                 record.id = 'draft_' + Date.now() + '_' + Math.floor(Math.random() * 1000000) + '_' + i;
+                record.imported = true;
                 db.unshift(record);
                 serverCallSilent('addRecord', [record], ()=>{}, ()=>{});
                 importCount++;
