@@ -552,12 +552,20 @@
                     
                     if (recycleBinTimer) clearTimeout(recycleBinTimer);
                     
-                    recycleBinTimer = setTimeout(() => {
-                        binBtn.style.display = 'none';
-                        if (activeStatusFilter === 'recycleBin') {
-                            setChipFilter('status', 'all');
+                    function hideBinLogic() {
+                        // Check if we are in recycle bin and selection mode is active
+                        if (activeStatusFilter === 'recycleBin' && typeof selectedRecords !== 'undefined' && selectedRecords.size > 0) {
+                            // Delay auto-hiding if user is actively selecting items
+                            recycleBinTimer = setTimeout(hideBinLogic, 60000);
+                        } else {
+                            binBtn.style.display = 'none';
+                            if (activeStatusFilter === 'recycleBin') {
+                                setChipFilter('status', 'all');
+                            }
                         }
-                    }, 60000);
+                    }
+                    
+                    recycleBinTimer = setTimeout(hideBinLogic, 60000);
                 }
             }
             let currentUser = null;
@@ -1647,47 +1655,29 @@
                         
                         // Yield to browser UI thread before heavy operations
                         setTimeout(() => {
-                            if (isBin) {
-                                activeStatusFilter = 'recycleBin';
-                                setBlankRecordMode('recycleBin');
-                                bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
-                                selectedRecords.clear();
-                                let first30 = bin.slice(0, 30);
-                                if (first30.length > 0) {
-                                    first30.forEach(x => selectedRecords.add(String(x.id)));
-                                }
-                                showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">delete</span> Recycle Bin Selected');
-                                renderRecycleBin();
-                                updateBulkHeader();
-                                updateFilterUI();
-                            } else {
-                                showTab('records');
-                                // Set filter manually without triggering immediate render
-                                activeStatusFilter = filterType;
-                                
-                                // Show toast logic
-                                if (filterType === 'all') showToast('All Data Selected');
-                                else if (filterType === 'verified') showToast('Verified Selected');
-                                else if (filterType === 'unverified') showToast('Unverified Selected');
-                                else if (filterType === 'pending') showToast('No Photos Selected');
-                                else if (filterType === 'recycleBin') showToast('Recycle Bin Selected');
-                                
-                                // Prepare data
-                                let filtered = db.filter(r => r.isDeleted !== true);
-                                if (filterType === 'verified') filtered = filtered.filter(r => (r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed'));
-                                else if (filterType === 'unverified') filtered = filtered.filter(r => !(r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed'));
-                                else if (filterType === 'pending') filtered = filtered.filter(r => !(r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed') && (!r.photoData && !r.docUrl));
-                                
-                                currentRecords = filtered;
-                                selectedRecords.clear();
-                                let first30 = currentRecords.slice(0, 30);
-                                if (first30.length > 0) {
-                                    first30.forEach(x => selectedRecords.add(String(x.id)));
-                                }
-                                renderCurrentRecordsPage();
-                                updateBulkHeader();
-                                updateFilterUI();
+                            showTab('records');
+                            activeStatusFilter = filterType;
+                            setBlankRecordMode(isBin ? 'recycleBin' : 'none');
+                            
+                            // Show toast logic
+                            if (filterType === 'all') showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">done_all</span> Selection Activated');
+                            else if (filterType === 'verified') showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">done_all</span> Selection Activated');
+                            else if (filterType === 'unverified') showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">done_all</span> Selection Activated');
+                            else if (filterType === 'pending') showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">done_all</span> Selection Activated');
+                            else if (filterType === 'recycleBin') showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">done_all</span> Selection Activated');
+                            
+                            // Use the single source of truth for filtering
+                            filterRecords();
+                            
+                            selectedRecords.clear();
+                            let first30 = currentRenderedRecords.slice(0, 30);
+                            if (first30.length > 0) {
+                                first30.forEach(x => selectedRecords.add(String(x.id)));
                             }
+                            
+                            renderCurrentRecordsPage();
+                            updateBulkHeader();
+                            
                             isLongPressProcessing = false;
                         }, 20);
                     }, 500);
@@ -3600,10 +3590,10 @@
                                 const year = new Date(r.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                 return si + year + String(snVal).padStart(3, '0');
                             } else {
-                                if (r.id && String(r.id).startsWith('draft_')) {
-                                    return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
+                                if (r.id && String(r.id).startsWith('import_')) {
+                                    return si + 'Import' + String(r.createdAt || Date.now()).slice(-3);
                                 } else {
-                                    return si + 'Imported' + String(r.createdAt || Date.now()).slice(-3);
+                                    return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
                                 }
                             }
                         })(),
@@ -4986,7 +4976,22 @@
                     } else {
                         isSavingRecord = false;
                         toggleSaveLoading(false);
-                        setBlankRecordMode('preview');
+                        
+                        // Automatically commit the new record (skip preview step)
+                        commitUnsavedPreviewRecord();
+                        showToast('Entry Saved Successfully! Ready for next.');
+                        
+                        // Reset the form for the next entry
+                        isPreviewFromSave = false;
+                        isPendingBatch = false;
+                        resetForm(true);
+                        
+                        // Ensure we stay in form mode
+                        setBlankRecordMode('form');
+                        renderCurrentRecordsPage();
+                        
+                        const mainScroll = document.querySelector('.system-scroll');
+                        if (mainScroll) mainScroll.scrollTop = 0;
                     }
 
                     // Data is no longer saved locally or remotely here for add mode.
@@ -6027,10 +6032,10 @@
                                             const year = new Date(rec.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                             return si + year + String(snVal).padStart(3, '0');
                                         } else {
-                                            if (rec.id && String(rec.id).startsWith('draft_')) {
-                                                return si + 'Draft' + String(rec.createdAt || Date.now()).slice(-3);
+                                            if (rec.id && String(rec.id).startsWith('import_')) {
+                                                return si + 'Import' + String(rec.createdAt || Date.now()).slice(-3);
                                             } else {
-                                                return si + 'Imported' + String(rec.createdAt || Date.now()).slice(-3);
+                                                return si + 'Draft' + String(rec.createdAt || Date.now()).slice(-3);
                                             }
                                         }
                                     })() }</div>
@@ -6242,21 +6247,15 @@
                                     <p class="text-[9px] font-bold text-slate-450 uppercase tracking-widest">Contact Info</p>
                                 </div>
                             </div>
-                            <div class="grid grid-cols-[auto_max-content_auto_1fr] gap-x-2 gap-y-2 text-xs text-slate-600 pt-1 font-semibold pl-1 items-start">
+                            <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-2 text-xs text-slate-600 pt-1 font-semibold pl-1 items-start">
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-phone"></i></div>
-                                <div>Mobile No</div>
-                                <div>:</div>
                                 <div><a href="tel:${schoolConfig.adminMobile || '7999565002'}" class="text-indigo-600 hover:underline">${schoolConfig.adminMobile || '7999565002'}</a></div>
                                 
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-envelope"></i></div>
-                                <div>Email ID</div>
-                                <div>:</div>
-                                <div class="break-all"><a href="mailto:${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}" class="text-indigo-600 hover:underline">${schoolConfig.adminEmail || 'Identify.jvd@gmail.com'}</a></div>
+                                <div><a href="mailto:${schoolConfig.adminEmail || 'javedansari7566@gmail.com'}" class="text-indigo-600 hover:underline break-all">${schoolConfig.adminEmail || 'javedansari7566@gmail.com'}</a></div>
                                 
                                 <div class="mt-[2px] text-slate-400 flex justify-center w-[14px]"><i class="fa-solid fa-location-dot"></i></div>
-                                <div>Address</div>
-                                <div>:</div>
-                                <div class="leading-relaxed">
+                                <div class="leading-snug">
                                     <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(schoolConfig.adminAddress || 'Anjuman Complex Chhindwara')}" target="_blank" class="text-indigo-600 hover:underline">${sanitizeHTML(schoolConfig.adminAddress || 'Anjuman Complex Chhindwara')}</a>
                                 </div>
                             </div>
@@ -6824,6 +6823,8 @@
                     let displayId = x.id;
                     if (displayId && displayId.startsWith('draft_')) {
                         displayId = 'DRAFT';
+                    } else if (displayId && displayId.startsWith('import_')) {
+                        displayId = 'IMPORT';
                     }
                     const rowId = escapeInlineId(displayId);
                     const initial = (x.studentName || 'S').charAt(0).toUpperCase();
@@ -7121,9 +7122,9 @@
                 let orderedClasses = [];
                 let counts = {};
 
-                let dbToCount = db;
+                let dbToCount = db.filter(r => !(r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true'));
                 if (currentUser && currentUser.userId === 'admin') {
-                    dbToCount = db.filter(r => {
+                    dbToCount = dbToCount.filter(r => {
                         const isReturned = (String(r.verified).toLowerCase() === 'returned' || String(r.status).toLowerCase() === 'returned' || r.returned === true || String(r.returned).toLowerCase() === 'true');
                         return (r.verified === 'Completed' || r.verified === true || String(r.verified).toLowerCase() === 'true') && !isReturned;
                     });
@@ -8297,7 +8298,7 @@
                         </div>
 
                         <!-- Email (same text size) -->
-                        <div class="text-[9.5px] text-slate-800 font-black tracking-wider uppercase truncate">
+                        <div class="text-[9.5px] text-slate-800 font-black tracking-wider lowercase truncate">
                             <a id="settings-school-email-link" href="#" class="hover:underline hover:text-emerald-700 transition-colors">
                                 <i class="fa-solid fa-envelope text-emerald-600 mr-1 text-[8.5px]"></i><span id="settings-school-email-display">--</span>
                             </a>
@@ -9888,7 +9889,7 @@
                     record.returned = false;
                 }
                 
-                record.id = 'draft_' + Date.now() + '_' + Math.floor(Math.random() * 1000000) + '_' + i;
+                record.id = 'import_' + Date.now() + '_' + Math.floor(Math.random() * 1000000) + '_' + i;
                 db.unshift(record);
                 serverCallSilent('addRecord', [record], ()=>{}, ()=>{});
                 importCount++;
