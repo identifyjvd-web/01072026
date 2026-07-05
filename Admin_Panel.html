@@ -2004,6 +2004,9 @@
                             }
                                 if (typeof fb_renderForm === 'function') fb_renderForm();
                                 if (typeof updateBrandingUI === 'function') updateBrandingUI();
+                            } else {
+                                if (typeof fb_renderForm === 'function') fb_renderForm();
+                                if (typeof updateBrandingUI === 'function') updateBrandingUI();
                             }
                         });
                     } catch (fbErr) {
@@ -3183,13 +3186,17 @@
                     return {
                         'Sn': (() => {
                             const isRecVerified = (r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed');
-                            const si = (schoolConfig.code || "DPS").trim().toUpperCase() || "DPS";
+                            const si = (schoolConfig.name || "DPS").trim().split(/\s+/).map(w=>w[0]).join('').toUpperCase() || "DPS";
                             if (isRecVerified) {
                                 const snVal = (r.sn && Number(r.sn) < 1000000000) ? r.sn : (index + 1);
                                 const year = new Date(r.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                 return si + year + String(snVal).padStart(3, '0');
                             } else {
-                                return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
+                                if (r.id && String(r.id).startsWith('draft_')) {
+                                    return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
+                                } else {
+                                    return si + 'Imported' + String(r.createdAt || Date.now()).slice(-3);
+                                }
                             }
                         })(),
                         'Id No': r.id || '',
@@ -3519,8 +3526,11 @@
                     serverCallSilent('deleteAllRecords', [], async () => {
                         db = [];
                         try { localStorage.removeItem('deleted_record_ids'); } catch(e){}
+                        try { localStorage.removeItem(ACTIVITY_KEY); } catch(e){}
+                        try { if (window.SchoolLocalDB && SchoolLocalDB.clearQueue) SchoolLocalDB.clearQueue(); } catch(e){}
                         
-                        try { if (window.idbClear) idbClear(IDB_STORE_RECORDS).catch(()=>{}); } catch(e){}
+                        try { if (window.idbClear) await idbClear(IDB_STORE_RECORDS).catch(()=>{}); } catch(e){}
+                        document.body.removeChild(overlay);
                         
                         // Send cross-device wipe signal
                         try {
@@ -4107,7 +4117,7 @@
                     currentFileType = compFile.type;
 
                     setUploadFieldProgress('Saved Locally', 100, false);
-                    resetUploadFieldLabel('Saved ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦');
+                    resetUploadFieldLabel('Saved');
                     pendingUploadedDocument = null;
                     queueServerDraftSync();
                 });
@@ -6925,12 +6935,9 @@
                 setTimeout(async () => {
                     let finalRec = { ...localRec };
                     
-                    if (finalRec.id.startsWith('draft_')) {
-                        const schoolCode = (schoolConfig.code || "DPS").trim().toUpperCase();
-                        const year = new Date().getFullYear().toString().slice(-2);
-                        
+                    if (!finalRec.sn) {
                         let localMaxSn = 0;
-                        db.forEach(x => { if (x.id && !x.id.startsWith('draft_') && x.sn && Number(x.sn) < 1000000000 && Number(x.sn) > localMaxSn) localMaxSn = Number(x.sn); });
+                        db.forEach(x => { if (x.sn && Number(x.sn) < 1000000000 && Number(x.sn) > localMaxSn) localMaxSn = Number(x.sn); });
                         const savedSn = parseInt(localStorage.getItem(SN_KEY)) || 0;
                         if (savedSn > localMaxSn) localMaxSn = savedSn;
                         
@@ -6955,11 +6962,6 @@
                             return;
                         }
 
-                        const paddedSn = String(nextSn).padStart(3, '0');
-                        const generatedId = `${schoolCode}${year}${paddedSn}`;
-                        
-                        finalRec.oldId = finalRec.id;
-                        finalRec.id = generatedId;
                         finalRec.sn = nextSn;
                     }
 
@@ -6967,10 +6969,9 @@
                     if (idxInDb !== -1) {
                         db[idxInDb] = {
                             ...db[idxInDb],
-                            id: finalRec.id,
-                            oldId: finalRec.oldId || db[idxInDb].id,
-                            sn: finalRec.sn,
+                            sn: finalRec.sn || db[idxInDb].sn,
                             verified: true,
+                            status: 'verified',
                             verifiedBy: getCurrentUserName(),
                             verifiedAt: getFormattedTimestamp(nowTs),
                             draftStatus: '',
@@ -6979,6 +6980,7 @@
                         };
                     } else {
                         finalRec.verified = true;
+                        finalRec.status = 'verified';
                         finalRec.verifiedBy = getCurrentUserName();
                         finalRec.verifiedAt = getFormattedTimestamp(nowTs);
                         finalRec.draftStatus = '';
@@ -7040,12 +7042,9 @@
                 setTimeout(async () => {
                     let finalRec = { ...localRec };
                     
-                    if (finalRec.id.startsWith('draft_')) {
-                        const schoolCode = (schoolConfig.code || "DPS").trim().toUpperCase();
-                        const year = new Date().getFullYear().toString().slice(-2);
-                        
+                    if (!finalRec.sn) {
                         let localMaxSn = 0;
-                        db.forEach(x => { if (x.id && !x.id.startsWith('draft_') && x.sn && Number(x.sn) < 1000000000 && Number(x.sn) > localMaxSn) localMaxSn = Number(x.sn); });
+                        db.forEach(x => { if (x.sn && Number(x.sn) < 1000000000 && Number(x.sn) > localMaxSn) localMaxSn = Number(x.sn); });
                         const savedSn = parseInt(localStorage.getItem(SN_KEY)) || 0;
                         if (savedSn > localMaxSn) localMaxSn = savedSn;
                         
@@ -7070,11 +7069,6 @@
                             return;
                         }
 
-                        const paddedSn = String(nextSn).padStart(3, '0');
-                        const generatedId = `${schoolCode}${year}${paddedSn}`;
-                        
-                        finalRec.oldId = finalRec.id;
-                        finalRec.id = generatedId;
                         finalRec.sn = nextSn;
                     }
 
@@ -7082,10 +7076,9 @@
                     if (idxInDb !== -1) {
                         db[idxInDb] = {
                             ...db[idxInDb],
-                            id: finalRec.id,
-                            oldId: finalRec.oldId || db[idxInDb].id,
-                            sn: finalRec.sn,
+                            sn: finalRec.sn || db[idxInDb].sn,
                             verified: true,
+                            status: 'verified',
                             verifiedBy: getCurrentUserName(),
                             verifiedAt: getFormattedTimestamp(nowTs),
                             draftStatus: '',
@@ -7094,6 +7087,7 @@
                         };
                     } else {
                         finalRec.verified = true;
+                        finalRec.status = 'verified';
                         finalRec.verifiedBy = getCurrentUserName();
                         finalRec.verifiedAt = getFormattedTimestamp(nowTs);
                         finalRec.draftStatus = '';

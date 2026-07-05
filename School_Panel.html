@@ -1625,6 +1625,7 @@
                 });
             }
 
+            let isLongPressProcessing = false;
             function setupFilterCardLongPress(elementId, filterType, isBin = false) {
                 const el = document.getElementById(elementId);
                 if (!el) return;
@@ -1634,26 +1635,61 @@
                 
                 const startLP = (e) => {
                     if (e.type === 'mousedown' && e.button !== 0) return;
+                    if (lpTimer) clearTimeout(lpTimer);
                     lpTriggered = false;
+                    
                     lpTimer = setTimeout(() => {
+                        if (isLongPressProcessing) return;
+                        isLongPressProcessing = true;
                         lpTriggered = true;
+                        
                         if (navigator.vibrate) navigator.vibrate(50);
                         
-                        if (isBin) {
-                            openRecycleBin();
-                            setTimeout(() => {
-                                if (!Array.isArray(bin) || bin.length === 0) return;
-                                toggleAllBinSelection();
-                            }, 100);
-                        } else {
-                            showTab('records');
-                            setChipFilter('status', filterType);
-                            setTimeout(() => {
-                                if (selectedRecords.size === 0) {
-                                    bulkToggleSelectAll();
+                        // Yield to browser UI thread before heavy operations
+                        setTimeout(() => {
+                            if (isBin) {
+                                activeStatusFilter = 'recycleBin';
+                                setBlankRecordMode('recycleBin');
+                                bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
+                                selectedRecords.clear();
+                                let first30 = bin.slice(0, 30);
+                                if (first30.length > 0) {
+                                    first30.forEach(x => selectedRecords.add(String(x.id)));
                                 }
-                            }, 100);
-                        }
+                                showToast('<span class="material-symbols-outlined text-[18px] mr-2" style="font-variation-settings: \'FILL\' 1; vertical-align: middle;">delete</span> Recycle Bin Selected');
+                                renderRecycleBin();
+                                updateBulkHeader();
+                                updateFilterUI();
+                            } else {
+                                showTab('records');
+                                // Set filter manually without triggering immediate render
+                                activeStatusFilter = filterType;
+                                
+                                // Show toast logic
+                                if (filterType === 'all') showToast('All Data Selected');
+                                else if (filterType === 'verified') showToast('Verified Selected');
+                                else if (filterType === 'unverified') showToast('Unverified Selected');
+                                else if (filterType === 'pending') showToast('No Photos Selected');
+                                else if (filterType === 'recycleBin') showToast('Recycle Bin Selected');
+                                
+                                // Prepare data
+                                let filtered = db.filter(r => r.isDeleted !== true);
+                                if (filterType === 'verified') filtered = filtered.filter(r => (r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed'));
+                                else if (filterType === 'unverified') filtered = filtered.filter(r => !(r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed'));
+                                else if (filterType === 'pending') filtered = filtered.filter(r => !(r.verified === true || String(r.verified).toLowerCase() === 'true' || r.verified === 'Completed') && (!r.photoData && !r.docUrl));
+                                
+                                currentRecords = filtered;
+                                selectedRecords.clear();
+                                let first30 = currentRecords.slice(0, 30);
+                                if (first30.length > 0) {
+                                    first30.forEach(x => selectedRecords.add(String(x.id)));
+                                }
+                                renderCurrentRecordsPage();
+                                updateBulkHeader();
+                                updateFilterUI();
+                            }
+                            isLongPressProcessing = false;
+                        }, 20);
                     }, 500);
                 };
                 
@@ -1723,7 +1759,7 @@
             const selectionZone = e.target.closest('.bin-selection-zone');
             if (selectionZone) {
                 const id = selectionZone.dataset.id;
-                if (binSelectedRecords.size > 0) {
+                if (selectedRecords.size > 0) {
                     e.stopPropagation(); e.preventDefault();
                     if (typeof binLpDidTrigger !== 'undefined' && binLpDidTrigger) {
                         binLpDidTrigger = false;
@@ -2123,7 +2159,7 @@
                             }
                         });
                         
-                        const pendingLocal = (typeof db !== 'undefined' ? db : []).filter(r => r._pending || r._syncStatus === 'syncing' || r._syncStatus === 'pending');
+                        const pendingLocal = (typeof db !== 'undefined' ? db : []).filter(r => r._pending || r._syncStatus === 'syncing' || r._syncStatus === 'pending' || r.isDeleted);
                         const serverFiltered = filterDeletedFromList([...serverDb]);
                         const mergedDb = serverFiltered.map(sRec => {
                             const lRec = pendingLocal.find(l => String(l.id) === String(sRec.id) || (l.oldId && String(l.oldId) === String(sRec.id)));
@@ -2341,6 +2377,11 @@
                             if (typeof fb_renderForm === 'function') fb_renderForm();
                             if (typeof generateDynamicFormFields === 'function') generateDynamicFormFields();
                             if (typeof updateBrandingUI === 'function') updateBrandingUI();
+                            } else {
+                                if (typeof fb_bootFromStorage === 'function') fb_bootFromStorage();
+                                if (typeof fb_renderForm === 'function') fb_renderForm();
+                                if (typeof generateDynamicFormFields === 'function') generateDynamicFormFields();
+                                if (typeof updateBrandingUI === 'function') updateBrandingUI();
                             }
                         });
                     } catch (fbErr) {
@@ -3559,7 +3600,11 @@
                                 const year = new Date(r.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                 return si + year + String(snVal).padStart(3, '0');
                             } else {
-                                return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
+                                if (r.id && String(r.id).startsWith('draft_')) {
+                                    return si + 'Draft' + String(r.createdAt || Date.now()).slice(-3);
+                                } else {
+                                    return si + 'Imported' + String(r.createdAt || Date.now()).slice(-3);
+                                }
                             }
                         })(),
                         'Id No': r.id || '',
@@ -3626,27 +3671,29 @@
             }
 
             // --- RECYCLE BIN ---
-            let binSelectedRecords = new Set();
+            
             let binLpTimer = null;
             let binLpDidTrigger = false;
 
             function triggerBinSelection(id) {
-                if (binSelectedRecords.size === 0) {
+                if (selectedRecords.size === 0) {
                     binLpDidTrigger = true;
-                    binSelectedRecords.add(String(id));
+                    selectedRecords.add(String(id));
                     if (navigator.vibrate) navigator.vibrate(50);
                     renderRecycleBin();
+                    updateBulkHeader();
                 }
             }
 
             function binLpStart(id) {
-                if (binSelectedRecords.size > 0) return;
+                if (selectedRecords.size > 0) return;
                 binLpDidTrigger = false;
                 binLpTimer = setTimeout(() => {
                     binLpDidTrigger = true;
-                    binSelectedRecords.add(String(id));
+                    selectedRecords.add(String(id));
                     if (navigator.vibrate) navigator.vibrate(50);
                     renderRecycleBin();
+                    updateBulkHeader();
                 }, 500);
             }
 
@@ -3674,26 +3721,26 @@
 
             function toggleBinSelection(id) {
                 const sid = String(id);
-                if (binSelectedRecords.has(sid)) binSelectedRecords.delete(sid);
-                else binSelectedRecords.add(sid);
+                if (selectedRecords.has(sid)) selectedRecords.delete(sid);
+                else selectedRecords.add(sid);
                 renderRecycleBin();
                 updateBulkHeader();
             }
 
             function toggleAllBinSelection() {
-                if (binSelectedRecords.size === bin.length) {
-                    binSelectedRecords.clear();
+                if (selectedRecords.size === bin.length) {
+                    selectedRecords.clear();
                 } else {
-                    bin.forEach(x => binSelectedRecords.add(String(x.id)));
+                    bin.forEach(x => selectedRecords.add(String(x.id)));
                 }
-                renderRecycleBin();
+                renderCurrentRecordsPage();
                 updateBulkHeader();
             }
 
             function bulkBinRestore() {
-                if (binSelectedRecords.size === 0) return;
-                showModal('confirm', 'Restore Selected?', 'Are you sure you want to restore ' + binSelectedRecords.size + ' records?', () => {
-                    const ids = Array.from(binSelectedRecords);
+                if (selectedRecords.size === 0) return;
+                showModal('confirm', 'Restore Selected?', 'Are you sure you want to restore ' + selectedRecords.size + ' records?', () => {
+                    const ids = Array.from(selectedRecords);
                     let count = 0;
                     ids.forEach(id => {
                         const idx = db.findIndex(r => String(r.id) === String(id));
@@ -3707,17 +3754,16 @@
                         }
                     });
                     showToast(count + ' records restored');
-                    binSelectedRecords.clear();
+                    selectedRecords.clear();
                     bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
-                    renderRecycleBin();
                     filterRecords();
                     updateBulkHeader();
                 });
             }
 
             function bulkBinDelete() {
-                if (binSelectedRecords.size === 0) return;
-                const ids = Array.from(binSelectedRecords);
+                if (selectedRecords.size === 0) return;
+                const ids = Array.from(selectedRecords);
                 let count = 0;
                 ids.forEach(id => {
                     db = db.filter(r => normalizeRecordId(r.id) !== normalizeRecordId(id));
@@ -3726,9 +3772,8 @@
                     count++;
                 });
                 showToast(count + ' records permanently deleted');
-                binSelectedRecords.clear();
+                selectedRecords.clear();
                 bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
-                renderRecycleBin();
                 filterRecords();
                 updateBulkHeader();
             }
@@ -3751,6 +3796,7 @@
                         </div>
                     `;
                 } else {
+                    let html = '';
                     bin.forEach((x, idx) => {
                         const deletedDate = x.deletedAt ? new Date(x.deletedAt).toLocaleDateString() : 'Unknown';
                         const initial = (x.studentName || 'S').charAt(0).toUpperCase();
@@ -3762,8 +3808,8 @@
                         if (idx === bin.length - 1) rowClasses.push('rounded-b-3xl', 'last:border-0');
                         if (idx !== bin.length - 1) rowClasses.push('last:border-0');
                         
-                        container.innerHTML += `
-                            <div class="${rowClasses.join(' ')}" style="-webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: pan-y;" data-id="${escapeInlineId(x.id)}" oncontextmenu="event.preventDefault(); triggerBinSelection('${escapeInlineId(x.id)}'); return false;" ${binSelectedRecords.size > 0 ? `onclick="toggleBinSelection('${escapeInlineId(x.id)}')"` : ''}>
+                        html += `
+                            <div class="${rowClasses.join(' ')}" style="-webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: pan-y;" data-id="${escapeInlineId(x.id)}" oncontextmenu="event.preventDefault(); triggerBinSelection('${escapeInlineId(x.id)}'); return false;" ${selectedRecords.size > 0 ? `onclick="toggleBinSelection('${escapeInlineId(x.id)}')"` : ''}>
                                 <div class="flex flex-1 items-stretch min-w-0">
                                     <div class="w-16 bg-[var(--accent-soft)] flex-shrink-0 flex items-center justify-center border-r border-gray-50 relative overflow-hidden">
                                         ${(photoSrc && photoSrc.length > 8) ? `<img src="${photoSrc}" class="w-full h-full object-cover" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><span class="text-2xl font-black text-emerald-600/20" style="display:none">${initial}</span>` : `<span class="text-2xl font-black text-emerald-600/20">${initial}</span>`}
@@ -3781,9 +3827,9 @@
                                             ${isRecVerified ? '' : (hasDoc ? '<span class="material-symbols-outlined text-[12px]" style="font-variation-settings: \'FILL\' 1;">unpublished</span>' : '<span class="material-symbols-outlined text-[12px]" style="font-variation-settings: \'FILL\' 1;">no_photography</span>')}
                                         </div>
                                     </div>
-                                    ${(binSelectedRecords.size > 0) ? `
-                                        <div class="bulk-cb w-[18px] h-[18px] rounded-md border-2 ${binSelectedRecords.has(String(x.id)) ? 'bg-emerald-600 border-emerald-600' : 'bg-white border-slate-300'} flex items-center justify-center transition-all" onclick="event.stopPropagation(); toggleBinSelection('${escapeInlineId(x.id)}')">
-                                            <i class="${binSelectedRecords.has(String(x.id)) ? 'fa-solid fa-check text-[10px] text-white' : ''}"></i>
+                                    ${(selectedRecords.size > 0) ? `
+                                        <div class="bulk-cb w-[18px] h-[18px] rounded-md border-2 ${selectedRecords.has(String(x.id)) ? 'bg-emerald-600 border-emerald-600' : 'bg-white border-slate-300'} flex items-center justify-center transition-all" onclick="event.stopPropagation(); toggleBinSelection('${escapeInlineId(x.id)}')">
+                                            <i class="${selectedRecords.has(String(x.id)) ? 'fa-solid fa-check text-[10px] text-white' : ''}"></i>
                                         </div>
                                     ` : `
                                         <div class="flex items-center gap-3">
@@ -3795,13 +3841,12 @@
                             </div>
                         `;
                     });
+                    container.innerHTML = html;
                 }
             }
 
             function openRecycleBin() {
-                setBlankRecordMode('recycleBin');
-                bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
-                renderRecycleBin();
+                activateRecycleBinFilter();
             }
 
             function openDevPhoto() {
@@ -3890,7 +3935,9 @@
                         deleted.deletedAt = new Date().toISOString();
                         storeRecordInDb(deleted);
                         try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, deleted).catch(()=>{}); } catch(e){}
-                        serverCallSilent('updateRecord', [deleted], ()=>{}, ()=>{});
+                        if (deleted.verified === true || String(deleted.verified).toLowerCase() === 'true' || deleted._serverSaved) {
+                            serverCallSilent('deleteRecord', [id], ()=>{}, ()=>{});
+                        }
                         showToast('Record moved to Recycle Bin');
                         renderCurrentRecordsPage();
                         filterRecords();
@@ -3915,6 +3962,10 @@
                     serverCallSilent('deleteAllRecords', [], () => {
                         db = [];
                         try { localStorage.removeItem('deleted_record_ids'); } catch(e){}
+                        lastFetchedSn = null;
+                        try { localStorage.removeItem(SN_KEY); } catch(e){}
+                        try { localStorage.removeItem(ACTIVITY_KEY); } catch(e){}
+                        try { if (window.SchoolLocalDB && SchoolLocalDB.clearQueue) SchoolLocalDB.clearQueue(); } catch(e){}
                         
                         try { if (window.idbClear) idbClear(IDB_STORE_RECORDS).catch(()=>{}); } catch(e){}
                         document.body.removeChild(overlay);
@@ -3946,8 +3997,7 @@
                 addActivity('RESTORE', item);
                 showToast('Record Restored Successfully');
                 bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
-                renderRecycleBin();
-                renderCurrentRecordsPage();
+                filterRecords();
             }
 
             function permDeleteRecordFromBin(id) {
@@ -3965,7 +4015,6 @@
                     addActivity('PERM_DELETE', item);
                     showToast('Record Permanently Deleted');
                     bin = db.filter(r => r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true');
-                    renderRecycleBin();
                     filterRecords();
             }
 
@@ -4929,7 +4978,9 @@
                     
                     if (eid) {
                         try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, previewRecord).catch(()=>{}); } catch(e){}
-                        serverCallSilent('updateRecord', [previewRecord], () => {});
+                        if (previewRecord.verified === true || String(previewRecord.verified).toLowerCase() === 'true' || previewRecord._serverSaved) {
+                            serverCallSilent('updateRecord', [previewRecord], () => {});
+                        }
                         finalizeSave();
                         closeStudentForm();
                     } else {
@@ -4985,7 +5036,7 @@
                 const badge = document.getElementById('selected-count-badge');
 
                 const isRecycleBinMode = activeStatusFilter === 'recycleBin';
-                const count = isRecycleBinMode ? binSelectedRecords.size : selectedRecords.size;
+                const count = selectedRecords.size;
                 const canShowBulkActions = count > 0 && (isRecycleBinMode || activeStatusFilter === 'unverified' || activeStatusFilter === 'pending' || (currentUser && currentUser.userId === 'admin' && (activeStatusFilter === 'verified' || activeStatusFilter === 'all')));
                 const filterRow = document.getElementById('class-filter-row');
                 if (filterRow && isRecycleBinMode) {
@@ -5088,8 +5139,9 @@
                 syncSelectedRecordsSection();
                 selectedRecords.clear();
                 if (activeStatusFilter === 'recycleBin') {
-                    binSelectedRecords.clear();
-                    renderRecycleBin();
+                    selectedRecords.clear();
+                    setBlankRecordMode('none');
+                    setChipFilter('status', 'all');
                 } else {
                     renderCurrentRecordsPage();
                 }
@@ -5200,7 +5252,9 @@
                         rec.isDeleted = false;
                         rec.isRestored = true;
                         try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, rec).catch(()=>{}); } catch(e){}
-                        serverCallSilent('updateRecord', [rec], ()=>{}, ()=>{});
+                        if (rec.verified === true || String(rec.verified).toLowerCase() === 'true' || rec._serverSaved) {
+                            serverCallSilent('updateRecord', [rec], ()=>{}, ()=>{});
+                        }
                     }
                 });
                 showToast(idsToRestore.length + ' records restored!');
@@ -5221,11 +5275,12 @@
                             rec.deletedAt = new Date().toISOString();
                             storeRecordInDb(rec);
                             try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, rec).catch(()=>{}); } catch(e){}
-                            serverCallSilent('updateRecord', [rec], ()=>{}, ()=>{});
+                            if (rec.verified === true || String(rec.verified).toLowerCase() === 'true' || rec._serverSaved) {
+                                serverCallSilent('deleteRecord', [id], ()=>{}, ()=>{});
+                            }
                         }
                     });
 
-                    
                     showToast(`${idsToDelete.length} records deleted!`);
                     selectedRecords.clear();
                     filterRecords();
@@ -5479,6 +5534,15 @@
 
                     return matchesText && matchesStatus && matchesClass;
                 });
+
+                if (activeStatusFilter === 'recycleBin') {
+                    bin = res;
+                }
+                
+                if (blankRecordMode === 'recycleBin') {
+                    setBlankRecordMode('none');
+                }
+                
                 renderRecords(res);
             }
             function resetFilters() { document.getElementById('mainSearch').value = ''; filterRecords(); }
@@ -5682,7 +5746,7 @@
 
             function buildRecycleBinHtml() {
                 return `
-                    <div class="flex-1 w-full overflow-y-auto min-h-0 bg-white" id="bin-content" style="min-height: 100%;">
+                    <div class="w-full bg-white" id="bin-content">
                         <!-- content will be injected by renderRecycleBin -->
                     </div>
                 `;
@@ -5963,7 +6027,11 @@
                                             const year = new Date(rec.createdAt || Date.now()).getFullYear().toString().slice(-2);
                                             return si + year + String(snVal).padStart(3, '0');
                                         } else {
-                                            return si + 'Draft' + String(rec.createdAt || Date.now()).slice(-3);
+                                            if (rec.id && String(rec.id).startsWith('draft_')) {
+                                                return si + 'Draft' + String(rec.createdAt || Date.now()).slice(-3);
+                                            } else {
+                                                return si + 'Imported' + String(rec.createdAt || Date.now()).slice(-3);
+                                            }
                                         }
                                     })() }</div>
                                 </div>
@@ -7144,7 +7212,9 @@
                             r.updatedAt = Date.now();
                             r.updatedBy = getCurrentUserName();
                             
-                            serverCallSilent('updateRecord', [r]);
+                            if (r.verified === true || String(r.verified).toLowerCase() === 'true' || r._serverSaved) {
+                                serverCallSilent('updateRecord', [r]);
+                            }
                             
                             pendingHighlightId = r.id;
                             renderHomeAnalysis();
@@ -7365,13 +7435,10 @@
                 setTimeout(async () => {
                     let finalRec = { ...localRec };
                     
-                    if (finalRec.id.startsWith('draft_')) {
-                        const schoolCode = (schoolConfig.code || "DPS").trim().toUpperCase();
-                        const year = new Date().getFullYear().toString().slice(-2);
-                        
+                    if (!finalRec.sn) {
                         let localMaxSn = 0;
                         db.forEach(r => {
-                            if (r.id && !r.id.startsWith('draft_') && r.sn && Number(r.sn) < 1000000000 && Number(r.sn) > localMaxSn) {
+                            if (r.sn && Number(r.sn) < 1000000000 && Number(r.sn) > localMaxSn) {
                                 localMaxSn = Number(r.sn);
                             }
                         });
@@ -7396,11 +7463,6 @@
                             return;
                         }
                         
-                        const paddedSn = String(nextSn).padStart(3, '0');
-                        const generatedId = `${schoolCode}${year}${paddedSn}`;
-                        
-                        finalRec.oldId = finalRec.id;
-                        finalRec.id = generatedId;
                         finalRec.sn = nextSn;
                     }
 
@@ -7408,10 +7470,9 @@
                     if (idxInDb !== -1) {
                         db[idxInDb] = {
                             ...db[idxInDb],
-                            id: finalRec.id,
-                            oldId: finalRec.oldId || db[idxInDb].id,
-                            sn: finalRec.sn,
+                            sn: finalRec.sn || db[idxInDb].sn,
                             verified: true,
+                            status: 'verified',
                             verifiedBy: getCurrentUserName(),
                             verifiedAt: getFormattedTimestamp(nowTs),
                             draftStatus: '',
@@ -7421,10 +7482,11 @@
                     } else {
                         const existingIdx = db.findIndex(x => x.id === finalRec.id);
                         if (existingIdx !== -1) {
-                            db[existingIdx] = { ...db[existingIdx], verified: true, verifiedBy: getCurrentUserName(), verifiedAt: getFormattedTimestamp(nowTs), draftStatus: '', _syncStatus: 'syncing', _pending: true };
+                            db[existingIdx] = { ...db[existingIdx], verified: true, status: 'verified', verifiedBy: getCurrentUserName(), verifiedAt: getFormattedTimestamp(nowTs), draftStatus: '', _syncStatus: 'syncing', _pending: true };
                             finalRec = db[existingIdx];
                         } else {
                             finalRec.verified = true;
+                            finalRec.status = 'verified';
                             finalRec.verifiedBy = getCurrentUserName();
                             finalRec.verifiedAt = getFormattedTimestamp(nowTs);
                             finalRec.draftStatus = '';
@@ -7488,13 +7550,10 @@
                 setTimeout(async () => {
                     let finalRec = { ...localRec };
                     
-                    if (finalRec.id.startsWith('draft_')) {
-                        const schoolCode = (schoolConfig.code || "DPS").trim().toUpperCase();
-                        const year = new Date().getFullYear().toString().slice(-2);
-                        
+                    if (!finalRec.sn) {
                         let localMaxSn = 0;
                         db.forEach(r => {
-                            if (r.id && !r.id.startsWith('draft_') && r.sn && Number(r.sn) < 1000000000 && Number(r.sn) > localMaxSn) {
+                            if (r.sn && Number(r.sn) < 1000000000 && Number(r.sn) > localMaxSn) {
                                 localMaxSn = Number(r.sn);
                             }
                         });
@@ -7519,11 +7578,6 @@
                             return;
                         }
 
-                        const paddedSn = String(nextSn).padStart(3, '0');
-                        const generatedId = `${schoolCode}${year}${paddedSn}`;
-                        
-                        finalRec.oldId = finalRec.id;
-                        finalRec.id = generatedId;
                         finalRec.sn = nextSn;
                     }
 
@@ -7531,10 +7585,9 @@
                     if (idxInDb !== -1) {
                         db[idxInDb] = {
                             ...db[idxInDb],
-                            id: finalRec.id,
-                            oldId: finalRec.oldId || db[idxInDb].id,
-                            sn: finalRec.sn,
+                            sn: finalRec.sn || db[idxInDb].sn,
                             verified: true,
+                            status: 'verified',
                             verifiedBy: getCurrentUserName(),
                             verifiedAt: getFormattedTimestamp(nowTs),
                             draftStatus: '',
@@ -7543,6 +7596,7 @@
                         };
                     } else {
                         finalRec.verified = true;
+                        finalRec.status = 'verified';
                         finalRec.verifiedBy = getCurrentUserName();
                         finalRec.verifiedAt = getFormattedTimestamp(nowTs);
                         finalRec.draftStatus = '';
@@ -7705,7 +7759,9 @@
                         rec.deletedAt = new Date().toISOString();
                         storeRecordInDb(rec);
                         try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, rec).catch(()=>{}); } catch(e){}
-                        serverCallSilent('updateRecord', [rec], ()=>{}, ()=>{});
+                        if (rec.verified === true || String(rec.verified).toLowerCase() === 'true' || rec._serverSaved) {
+                            serverCallSilent('deleteRecord', [id], ()=>{}, ()=>{});
+                        }
                     }
                     showToast('Record removed successfully');
 
@@ -9987,7 +10043,8 @@
         
         storeRecordInDb(previewRecord);
         if (typeof queueServerDraftSync === 'function') queueServerDraftSync();
-        if (!String(previewRecord.id).startsWith('draft_') && !String(previewRecord.id).startsWith('TEMP_')) {
+        
+        if (previewRecord.verified === true || String(previewRecord.verified).toLowerCase() === 'true' || previewRecord.status === 'verified' || previewRecord._serverSaved) {
             serverCallSilent('updateRecord', [previewRecord]);
         }
         
