@@ -92,6 +92,35 @@ const SchoolLocalDB = {
     }
 };
 
+function isVerifiedRecordForSync(record) {
+    if (!record || typeof record !== 'object') return false;
+    if (record._serverSaved === true) return true;
+    if (record.verified === true || record.verified === 'Completed') return true;
+    return String(record.verified).toLowerCase() === 'true';
+}
+
+function getRecordForSync(fn, args) {
+    const firstArg = args && args[0];
+    if (firstArg && typeof firstArg === 'object') return firstArg;
+    if (typeof firstArg === 'string') {
+        const localRecord = (typeof db !== 'undefined' && Array.isArray(db)) ? db.find(x => String(x.id) === String(firstArg)) : null;
+        if (localRecord) return localRecord;
+    }
+    return firstArg || null;
+}
+
+function shouldSyncRecordToServer(fn, args) {
+    const isSyncableFn = ['addRecord', 'submitStudentData', 'updateRecord', 'deleteRecord', 'restoreRecord', 'permanentDelete'].includes(fn);
+    if (!isSyncableFn) return false;
+
+    const record = getRecordForSync(fn, args);
+    if (fn === 'deleteRecord' || fn === 'restoreRecord' || fn === 'permanentDelete') {
+        return isVerifiedRecordForSync(record);
+    }
+
+    return isVerifiedRecordForSync(record);
+}
+
 window.addEventListener('online', async () => {
     const queue = await SchoolLocalDB.getAllSyncQueue();
     const syncableQueue = queue.filter(item => item.status === 'Verified' || item.status === 'Deleted');
@@ -125,6 +154,11 @@ window.addEventListener('online', async () => {
 });
 
 function serverCall(fn, args, onSuccess, onFailure) {
+    if (['addRecord', 'submitStudentData', 'updateRecord', 'deleteRecord', 'restoreRecord', 'permanentDelete'].includes(fn) && !shouldSyncRecordToServer(fn, args)) {
+        if (onSuccess) onSuccess(args && args[0] ? args[0] : true);
+        return;
+    }
+
     if (fn === 'loginUser') {
         const credentials = args[0] || {};
         const userId = (credentials.userId || '').toLowerCase();
@@ -153,7 +187,12 @@ function serverCall(fn, args, onSuccess, onFailure) {
 
 function serverCallSilent(fn, args, onSuccess, onFailure) {
     const isOffline = !navigator.onLine;
-    const isSyncableFn = (fn === 'updateRecord' || fn === 'submitStudentData' || fn === 'addRecord' || fn === 'deleteRecord' || fn === 'restoreRecord' || fn === 'permanentDelete');
+    const isSyncableFn = ['addRecord', 'submitStudentData', 'updateRecord', 'deleteRecord', 'restoreRecord', 'permanentDelete'].includes(fn);
+
+    if (isSyncableFn && !shouldSyncRecordToServer(fn, args)) {
+        if (onSuccess) onSuccess(args && args[0] ? args[0] : true);
+        return;
+    }
 
     if (isSyncableFn) {
         let recId = null;
@@ -314,4 +353,12 @@ async function handleFirebaseCall(fn, args, onSuccess, onFailure) {
         console.error("Firebase Error:", error);
         if (onFailure) onFailure(error);
     }
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        isVerifiedRecordForSync,
+        getRecordForSync,
+        shouldSyncRecordToServer
+    };
 }

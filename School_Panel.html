@@ -607,6 +607,90 @@
             const AUTO_LOGOUT_MS = 10 * 60 * 1000; // 10 minutes of inactivity
             let activeStatusFilter = 'all';
             let activeClassFilter = 'all';
+            const SOUND_FEEDBACK_MUTE_KEY = 'identify_sound_feedback_mute_v1';
+            let soundFeedbackMuted = false;
+            let soundContext = null;
+
+            function loadSoundPreference() {
+                try {
+                    soundFeedbackMuted = localStorage.getItem(SOUND_FEEDBACK_MUTE_KEY) === 'true';
+                } catch (e) {
+                    soundFeedbackMuted = false;
+                }
+                return soundFeedbackMuted;
+            }
+
+            function ensureSoundContext() {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return null;
+                if (!soundContext) soundContext = new AudioCtx();
+                if (soundContext.state === 'suspended') {
+                    soundContext.resume().catch(() => {});
+                }
+                return soundContext;
+            }
+
+            function playFeedbackTone(kind = 'success') {
+                if (soundFeedbackMuted) return;
+                const ctx = ensureSoundContext();
+                if (!ctx) return;
+                const now = ctx.currentTime;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                const presets = {
+                    success: [860, 1240],
+                    error: [220, 180],
+                    action: [660, 760]
+                };
+                const [freq1, freq2] = presets[kind] || presets.action;
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(freq1, now);
+                osc.frequency.exponentialRampToValueAtTime(freq2, now + 0.08);
+                gain.gain.setValueAtTime(0.0001, now);
+                gain.gain.exponentialRampToValueAtTime(0.025, now + 0.01);
+                gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+                osc.start(now);
+                osc.stop(now + 0.17);
+            }
+
+            function setSoundFeedbackMuted(muted) {
+                soundFeedbackMuted = !!muted;
+                try {
+                    localStorage.setItem(SOUND_FEEDBACK_MUTE_KEY, soundFeedbackMuted ? 'true' : 'false');
+                } catch (e) {}
+                updateSoundToggleUI();
+            }
+
+            function toggleSoundFeedback() {
+                setSoundFeedbackMuted(!soundFeedbackMuted);
+                if (!soundFeedbackMuted) {
+                    playFeedbackTone('success');
+                }
+            }
+
+            function updateSoundToggleUI() {
+                const toggles = document.querySelectorAll('.sound-feedback-toggle');
+                const knobs = document.querySelectorAll('.sound-feedback-toggle-knob');
+                const icons = document.querySelectorAll('.sound-feedback-toggle-icon');
+                if (!toggles.length || !knobs.length || !icons.length) return;
+                toggles.forEach(toggle => {
+                    toggle.classList.toggle('bg-emerald-500', !soundFeedbackMuted);
+                    toggle.classList.toggle('bg-slate-200', soundFeedbackMuted);
+                    toggle.classList.toggle('border-emerald-500', !soundFeedbackMuted);
+                    toggle.classList.toggle('border-slate-200', soundFeedbackMuted);
+                    toggle.setAttribute('aria-pressed', String(!soundFeedbackMuted));
+                });
+                knobs.forEach(knob => {
+                    knob.classList.toggle('translate-x-5', !soundFeedbackMuted);
+                    knob.classList.toggle('translate-x-0', soundFeedbackMuted);
+                });
+                icons.forEach(icon => {
+                    icon.className = `fa-solid ${soundFeedbackMuted ? 'fa-volume-xmark text-slate-400' : 'fa-volume-high text-emerald-600'} text-[10px]`;
+                });
+            }
 
             // Form Builder State
             let fb_fields = [];
@@ -1634,6 +1718,13 @@
             }
 
             let isLongPressProcessing = false;
+            function triggerHapticFeedback(pattern = 6) {
+                try {
+                    if (!navigator.vibrate || !window.matchMedia('(pointer: coarse)').matches) return;
+                    navigator.vibrate(pattern);
+                } catch (e) {}
+            }
+
             function setupFilterCardLongPress(elementId, filterType, isBin = false) {
                 const el = document.getElementById(elementId);
                 if (!el) return;
@@ -1651,7 +1742,7 @@
                         isLongPressProcessing = true;
                         lpTriggered = true;
                         
-                        if (navigator.vibrate) navigator.vibrate(50);
+                        triggerHapticFeedback([8, 16, 8]);
                         
                         // Yield to browser UI thread before heavy operations
                         setTimeout(() => {
@@ -1829,6 +1920,8 @@
                     showTab('records', { pushHistory: false, replaceHistory: true });
                     restoreDraft();
                     updateCurrentUserUi();
+                    loadSoundPreference();
+                    updateSoundToggleUI();
                     requireLoginAndBoot();
                     // Ensure popstate is handled by app navigation
                     window.addEventListener('popstate', handleBrowserNavigation);
@@ -3109,6 +3202,13 @@
                     if (pagWrapper) pagWrapper.classList.add('hidden');
                     if (cntWrapper) cntWrapper.classList.remove('hidden');
                     if (notifWrapper) notifWrapper.classList.add('hidden');
+                } else if (mode === 'settings') {
+                    if (pagWrapper) pagWrapper.classList.add('hidden');
+                    if (cntWrapper) cntWrapper.classList.add('hidden');
+                    if (notifWrapper) {
+                        notifWrapper.classList.remove('hidden');
+                        notifWrapper.innerHTML = `<span class="text-[11px] font-bold text-emerald-600">V ${APP_VERSION}</span>`;
+                    }
                 } else {
                     if (pagWrapper) pagWrapper.classList.add('hidden');
                     if (cntWrapper) cntWrapper.classList.add('hidden');
@@ -3666,22 +3766,25 @@
             let binLpDidTrigger = false;
 
             function triggerBinSelection(id) {
-                if (selectedRecords.size === 0) {
+                const selectionSet = syncSelectedRecordsSection();
+                if (selectionSet.size === 0 || !selectionSet.has(String(id))) {
                     binLpDidTrigger = true;
-                    selectedRecords.add(String(id));
-                    if (navigator.vibrate) navigator.vibrate(50);
+                    selectionSet.add(String(id));
+                    selectedRecords = selectionSet;
+                    triggerHapticFeedback([8, 16, 8]);
                     renderRecycleBin();
                     updateBulkHeader();
                 }
             }
 
             function binLpStart(id) {
-                if (selectedRecords.size > 0) return;
+                const selectionSet = syncSelectedRecordsSection();
                 binLpDidTrigger = false;
                 binLpTimer = setTimeout(() => {
                     binLpDidTrigger = true;
-                    selectedRecords.add(String(id));
-                    if (navigator.vibrate) navigator.vibrate(50);
+                    selectionSet.add(String(id));
+                    selectedRecords = selectionSet;
+                    triggerHapticFeedback([8, 16, 8]);
                     renderRecycleBin();
                     updateBulkHeader();
                 }, 500);
@@ -3710,20 +3813,24 @@
             }
 
             function toggleBinSelection(id) {
+                const selectionSet = syncSelectedRecordsSection();
                 const sid = String(id);
-                if (selectedRecords.has(sid)) selectedRecords.delete(sid);
-                else selectedRecords.add(sid);
+                if (selectionSet.has(sid)) selectionSet.delete(sid);
+                else selectionSet.add(sid);
+                selectedRecords = selectionSet;
                 renderRecycleBin();
                 updateBulkHeader();
             }
 
             function toggleAllBinSelection() {
-                if (selectedRecords.size === bin.length) {
-                    selectedRecords.clear();
+                const selectionSet = syncSelectedRecordsSection();
+                if (selectionSet.size === bin.length) {
+                    selectionSet.clear();
                 } else {
-                    bin.forEach(x => selectedRecords.add(String(x.id)));
+                    bin.forEach(x => selectionSet.add(String(x.id)));
                 }
-                renderCurrentRecordsPage();
+                selectedRecords = selectionSet;
+                renderRecycleBin();
                 updateBulkHeader();
             }
 
@@ -4682,6 +4789,11 @@
                 };
                 const toneConfig = toneMap[tone] || toneMap.working;
                 modal.classList.remove('hidden');
+                if (tone === 'success') {
+                    playFeedbackTone('success');
+                } else if (tone === 'error') {
+                    playFeedbackTone('error');
+                }
                 titleEl.innerHTML = title || 'Working';
                 msgEl.innerHTML = message || '';
                 icon.className = `w-16 h-16 rounded-full mx-auto mb-4 flex items-center justify-center ${toneConfig.iconClass}`;
@@ -4913,6 +5025,7 @@
                         updatedBy: getCurrentUserName(),
                         createdAt: eid ? ((existing && existing.createdAt) || nowTs) : nowTs,
                         updatedAt: nowTs, 
+                        isRestored: false,
                         draftStatus: (eid || isPendingBatch) ? '' : 'DRAFT',
                         verified: (existing && (String(existing.verified).toLowerCase() === 'returned' || existing.returned === true || String(existing.returned).toLowerCase() === 'true' || String(existing.status).toLowerCase() === 'returned')) ? false : !!(existing && existing.verified && String(existing.verified).toLowerCase() !== 'false'),
                         returned: false,
@@ -4976,22 +5089,7 @@
                     } else {
                         isSavingRecord = false;
                         toggleSaveLoading(false);
-                        
-                        // Automatically commit the new record (skip preview step)
-                        commitUnsavedPreviewRecord();
-                        showToast('Entry Saved Successfully! Ready for next.');
-                        
-                        // Reset the form for the next entry
-                        isPreviewFromSave = false;
-                        isPendingBatch = false;
-                        resetForm(true);
-                        
-                        // Ensure we stay in form mode
-                        setBlankRecordMode('form');
-                        renderCurrentRecordsPage();
-                        
-                        const mainScroll = document.querySelector('.system-scroll');
-                        if (mainScroll) mainScroll.scrollTop = 0;
+                        setBlankRecordMode('preview');
                     }
 
                     // Data is no longer saved locally or remotely here for add mode.
@@ -5031,17 +5129,18 @@
                     selectedRecordsBySection[nextKey] = selectedRecords;
                     selectedRecordsSectionKey = nextKey;
                 }
+                return selectedRecords;
             }
 
             function updateBulkHeader() {
-                syncSelectedRecordsSection();
+                const selectionSet = syncSelectedRecordsSection();
                 const bulkContainer = document.getElementById('bulk-actions-container');
                 const toggleBtn = document.getElementById('toggle-form-btn');
                 const toggleIcon = document.getElementById('toggle-icon');
                 const badge = document.getElementById('selected-count-badge');
 
                 const isRecycleBinMode = activeStatusFilter === 'recycleBin';
-                const count = selectedRecords.size;
+                const count = selectionSet.size;
                 const canShowBulkActions = count > 0 && (isRecycleBinMode || activeStatusFilter === 'unverified' || activeStatusFilter === 'pending' || (currentUser && currentUser.userId === 'admin' && (activeStatusFilter === 'verified' || activeStatusFilter === 'all')));
                 const filterRow = document.getElementById('class-filter-row');
                 if (filterRow && isRecycleBinMode) {
@@ -5141,10 +5240,10 @@
             }
 
             function resetBulkSelection() {
-                syncSelectedRecordsSection();
-                selectedRecords.clear();
+                const selectionSet = syncSelectedRecordsSection();
+                selectionSet.clear();
+                selectedRecords = selectionSet;
                 if (activeStatusFilter === 'recycleBin') {
-                    selectedRecords.clear();
                     setBlankRecordMode('none');
                     setChipFilter('status', 'all');
                 } else {
@@ -5162,19 +5261,20 @@
             }
 
             function toggleRecordSelection(id, event) {
-                syncSelectedRecordsSection();
+                const selectionSet = syncSelectedRecordsSection();
                 if (event) event.stopPropagation();
                 const strId = String(id);
-                const wasEmpty = selectedRecords.size === 0;
-                const isSelectedNow = !selectedRecords.has(strId);
+                const wasEmpty = selectionSet.size === 0;
+                const isSelectedNow = !selectionSet.has(strId);
                 
                 if (isSelectedNow) {
-                    selectedRecords.add(strId);
+                    selectionSet.add(strId);
                 } else {
-                    selectedRecords.delete(strId);
+                    selectionSet.delete(strId);
                 }
+                selectedRecords = selectionSet;
 
-                const isEmptyNow = selectedRecords.size === 0;
+                const isEmptyNow = selectionSet.size === 0;
 
                 if (wasEmpty !== isEmptyNow) {
                     renderCurrentRecordsPage();
@@ -5198,14 +5298,15 @@
             }
 
             function bulkToggleSelectAll() {
-                syncSelectedRecordsSection();
+                const selectionSet = syncSelectedRecordsSection();
                 const visibleUnverified = currentRenderedRecords; // Already contains records for current filter
 
-                if (selectedRecords.size === visibleUnverified.length && visibleUnverified.length > 0) {
-                    selectedRecords.clear();
+                if (selectionSet.size === visibleUnverified.length && visibleUnverified.length > 0) {
+                    selectionSet.clear();
                 } else {
-                    visibleUnverified.forEach(r => selectedRecords.add(String(r.id)));
+                    visibleUnverified.forEach(r => selectionSet.add(String(r.id)));
                 }
+                selectedRecords = selectionSet;
 
                 renderCurrentRecordsPage();
                 updateBulkHeader();
@@ -6171,6 +6272,20 @@
                         </div>
                         ` : ''}
 
+                        <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                            <div class="flex items-center justify-between gap-3">
+                                <div>
+                                    <div class="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Sound feedback</div>
+                                    <div class="text-[11px] text-slate-500">Soft tones for save, verify, and alerts.</div>
+                                </div>
+                                <button class="sound-feedback-toggle relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border border-slate-200 bg-slate-200 transition-colors" type="button" onclick="toggleSoundFeedback()" aria-pressed="false">
+                                    <span class="sound-feedback-toggle-knob ml-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white shadow transition-transform translate-x-0">
+                                        <i class="sound-feedback-toggle-icon fa-solid fa-volume-xmark text-[10px] text-slate-400"></i>
+                                    </span>
+                                </button>
+                            </div>
+                        </div>
+
                         <div onclick="openDataInformation()" class="system-card p-5 rounded-2xl flex items-center gap-4 clickable-card hover:border-amber-300 group">
                             <div class="w-12 h-12 rounded-2xl bg-amber-100 flex items-center justify-center text-amber-600 group-hover:bg-amber-600 group-hover:text-white transition-all shadow-sm">
                                 <i class="fa-solid fa-chart-simple text-xl"></i>
@@ -6286,6 +6401,7 @@
                         const infoEl = document.getElementById('records-page-info');
                         if (countEl) countEl.innerText = '0/0';
                         if (infoEl) infoEl.innerText = 'Page 1 of 1';
+                        updateSoundToggleUI();
                         lucide.createIcons();
                         return;
                     }
@@ -7122,7 +7238,7 @@
                 let orderedClasses = [];
                 let counts = {};
 
-                let dbToCount = db.filter(r => !(r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true'));
+                let dbToCount = (Array.isArray(db) ? db : []).filter(r => !(r.isDeleted === true || String(r.isDeleted).toLowerCase() === 'true'));
                 if (currentUser && currentUser.userId === 'admin') {
                     dbToCount = dbToCount.filter(r => {
                         const isReturned = (String(r.verified).toLowerCase() === 'returned' || String(r.status).toLowerCase() === 'returned' || r.returned === true || String(r.returned).toLowerCase() === 'true');
@@ -7131,15 +7247,15 @@
                 }
 
                 if (Array.isArray(classesOverride) && classesOverride.length > 0) {
-                    // Use the list provided from the database
-                    orderedClasses = classesOverride;
-                    // Also need counts from current db for UI numbers
+                    orderedClasses = classesOverride.filter(name => {
+                        const className = String(name || '').trim();
+                        return className && (counts[className] || 0) > 0;
+                    });
                     dbToCount.forEach(record => {
                         const className = (record && record.sclass ? String(record.sclass).trim() : '');
                         if (className) counts[className] = (counts[className] || 0) + 1;
                     });
                 } else {
-                    // Default behavior: extract from current db array
                     counts = dbToCount.reduce((acc, record) => {
                         const className = (record && record.sclass ? String(record.sclass).trim() : '');
                         if (!className) return acc;
@@ -7421,10 +7537,12 @@
                 showToast((localRec.studentName || 'Record') + ' Verified Successfully');
                 setChipFilter('status', 'verified'); 
                 previewRecord.verified = true;
+                previewRecord.isRestored = false;
                 
                 const idxSync = db.findIndex(x => x.id === localRec.id);
                 if (idxSync !== -1) {
                     db[idxSync].verified = true;
+                    db[idxSync].isRestored = false;
                     db[idxSync]._pending = true;
                     db[idxSync]._syncStatus = 'pending';
                     try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, db[idxSync]).catch(()=>{}); } catch(e){}
@@ -7454,6 +7572,7 @@
                             const idxInDb = db.findIndex(x => x.id === localRec.id);
                             if (idxInDb !== -1) {
                                 db[idxInDb].verified = true;
+                                db[idxInDb].isRestored = false;
                                 db[idxInDb]._syncStatus = 'pending';
                                 db[idxInDb]._pending = true;
                                 syncVerifiedRecordToGoogle(db[idxInDb]);
@@ -7473,6 +7592,7 @@
                             ...db[idxInDb],
                             sn: finalRec.sn || db[idxInDb].sn,
                             verified: true,
+                            isRestored: false,
                             status: 'verified',
                             verifiedBy: getCurrentUserName(),
                             verifiedAt: getFormattedTimestamp(nowTs),
@@ -7483,10 +7603,11 @@
                     } else {
                         const existingIdx = db.findIndex(x => x.id === finalRec.id);
                         if (existingIdx !== -1) {
-                            db[existingIdx] = { ...db[existingIdx], verified: true, status: 'verified', verifiedBy: getCurrentUserName(), verifiedAt: getFormattedTimestamp(nowTs), draftStatus: '', _syncStatus: 'syncing', _pending: true };
+                            db[existingIdx] = { ...db[existingIdx], verified: true, isRestored: false, status: 'verified', verifiedBy: getCurrentUserName(), verifiedAt: getFormattedTimestamp(nowTs), draftStatus: '', _syncStatus: 'syncing', _pending: true };
                             finalRec = db[existingIdx];
                         } else {
                             finalRec.verified = true;
+                            finalRec.isRestored = false;
                             finalRec.status = 'verified';
                             finalRec.verifiedBy = getCurrentUserName();
                             finalRec.verifiedAt = getFormattedTimestamp(nowTs);
@@ -7526,6 +7647,7 @@
                 const idxSync = db.findIndex(x => x.id === localRec.id);
                 if (idxSync !== -1) {
                     db[idxSync].verified = true;
+                    db[idxSync].isRestored = false;
                     db[idxSync]._pending = true;
                     db[idxSync]._syncStatus = 'pending';
                     try { if (window.idbPut) idbPut(IDB_STORE_RECORDS, db[idxSync]).catch(()=>{}); } catch(e){}
@@ -7569,6 +7691,7 @@
                             const idxInDb = db.findIndex(x => x.id === localRec.id);
                             if (idxInDb !== -1) {
                                 db[idxInDb].verified = true;
+                                db[idxInDb].isRestored = false;
                                 db[idxInDb]._syncStatus = 'pending';
                                 db[idxInDb]._pending = true;
                                 syncVerifiedRecordToGoogle(db[idxInDb]);
@@ -7588,6 +7711,7 @@
                             ...db[idxInDb],
                             sn: finalRec.sn || db[idxInDb].sn,
                             verified: true,
+                            isRestored: false,
                             status: 'verified',
                             verifiedBy: getCurrentUserName(),
                             verifiedAt: getFormattedTimestamp(nowTs),
@@ -7597,6 +7721,7 @@
                         };
                     } else {
                         finalRec.verified = true;
+                        finalRec.isRestored = false;
                         finalRec.status = 'verified';
                         finalRec.verifiedBy = getCurrentUserName();
                         finalRec.verifiedAt = getFormattedTimestamp(nowTs);
@@ -7636,6 +7761,7 @@
             function commitUnsavedPreviewRecord() {
                 if (!previewRecord || !previewRecord._isUnsaved) return;
                 previewRecord._isUnsaved = false;
+                previewRecord.isRestored = false;
                 
                 const localRec = { ...previewRecord };
                 delete localRec._displayPhotoSrc;
@@ -7645,6 +7771,7 @@
                 localRec.updatedAt = Date.now();
                 localRec._pending = true;
                 localRec._syncStatus = 'pending';
+                localRec.isRestored = false;
                 
                 try {
                     idbPut(IDB_STORE_RECORDS, { ...localRec }).catch(() => { });
@@ -7673,7 +7800,7 @@
                 if (!skipServerFinalize && previewRecord && previewRecord.id) {
                     if (isVerified) {
                         setSyncStatus('Saving ' + firstName + '...', 40);
-                        const finalRec = { ...previewRecord };
+                        const finalRec = { ...previewRecord, isRestored: false };
                         serverCallSilent('updateRecord', [finalRec], (res) => {
                             setSyncStatus(firstName + ' Saved!', 100);
                             setTimeout(() => setSyncStatus(''), 2000);
@@ -7683,13 +7810,15 @@
                     draftServerRecordId = '';
                 }
 
+                const wasFromSave = isPreviewFromSave;
+
                 showModal('success', modalTitle, '', () => {
                     const currentRec = previewRecord;
                     isPreviewFromSave = false;
                     isPendingBatch = false;
                     resetForm(true); 
                     
-                    if (currentRec) {
+                    if (currentRec && !wasFromSave) {
                         previewRecord = currentRec;
                         const list = (currentRenderedRecords && currentRenderedRecords.length > 0 && currentRenderedRecords.findIndex(r => r.id === previewRecord.id) !== -1) ? currentRenderedRecords : db;
                         const currentIndex = list.findIndex(r => r.id === previewRecord.id);
@@ -7702,7 +7831,11 @@
                     }
                     
                     previewRecord = null;
-                    closeStudentForm(); 
+                    if (wasFromSave) {
+                        setBlankRecordMode('student');
+                    } else {
+                        closeStudentForm(); 
+                    }
                 }, 'Yes, Delete', `${studentName}'s Data`);
             }
 
@@ -7849,7 +7982,7 @@
                 _lpDidTrigger = false;
                 _lpTimer = setTimeout(() => {
                     _lpDidTrigger = true;
-                    if (navigator.vibrate) navigator.vibrate(50);
+                    triggerHapticFeedback([8, 16, 8]);
                     if (activeStatusFilter === 'recycleBin' || activeStatusFilter === 'unverified' || activeStatusFilter === 'pending' || (currentUser && currentUser.userId === 'admin' && (activeStatusFilter === 'verified' || activeStatusFilter === 'all'))) {
                         toggleRecordSelection(id, null);
                     }
@@ -7886,11 +8019,11 @@
                     let diff = touchEndX - _previewTouchStartX;
                     if (diff > 60) {
                         // Swiped right -> Go to previous card
-                        if (navigator.vibrate) navigator.vibrate(15);
+                        triggerHapticFeedback(6);
                         openPrevPreview();
                     } else if (diff < -60) {
                         // Swiped left -> Go to next card
-                        if (navigator.vibrate) navigator.vibrate(15);
+                        triggerHapticFeedback(6);
                         openNextPreview();
                     }
                 }
@@ -7945,7 +8078,7 @@
                 } else {
                     currentIndex = (currentIndex - 1 + statuses.length) % statuses.length;
                 }
-                if (navigator.vibrate) navigator.vibrate(15);
+                triggerHapticFeedback(6);
                 setChipFilter('status', statuses[currentIndex]);
             }
 
@@ -8082,15 +8215,6 @@
                 });
             }
 
-            // Global Haptic Feedback on button elements and active items
-            document.addEventListener('pointerdown', (e) => {
-                const target = e.target.closest('button, .clickable-card, .menu-item, [onclick], .nav-item, .school-filter-btn, .chip');
-                if (target && navigator.vibrate) {
-                    navigator.vibrate(15);
-                }
-            }, { passive: true });
-
-            
 
             if (document.readyState === 'loading') {
                 document.addEventListener('DOMContentLoaded', init);
@@ -8328,6 +8452,20 @@
 
 
 
+                    <div class="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                        <div class="flex items-center justify-between gap-3">
+                            <div>
+                                <div class="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Sound feedback</div>
+                                <div class="text-[11px] text-slate-500">Soft tones for save, verify, and alerts.</div>
+                            </div>
+                            <button class="sound-feedback-toggle relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border border-slate-200 bg-slate-200 transition-colors" type="button" onclick="toggleSoundFeedback()" aria-pressed="false">
+                                <span class="sound-feedback-toggle-knob ml-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white shadow transition-transform translate-x-0">
+                                    <i class="sound-feedback-toggle-icon fa-solid fa-volume-xmark text-[10px] text-slate-400"></i>
+                                </span>
+                            </button>
+                        </div>
+                    </div>
+
                     <div
                         class="bg-emerald-50 rounded-3xl p-4 border border-emerald-100 flex flex-col items-center mt-4">
                         <i class="fa-solid fa-image text-emerald-600 mb-2"></i>
@@ -8463,6 +8601,13 @@
             }
 
             document.getElementById('_global_toast_msg').innerHTML = message;
+            const toneHint = (() => {
+                const text = String(message || '').toLowerCase();
+                if (text.includes('error') || text.includes('incorrect') || text.includes('failed') || text.includes('required') || text.includes('missing')) return 'error';
+                if (text.includes('success') || text.includes('verified') || text.includes('restored') || text.includes('saved') || text.includes('deleted') || text.includes('synced') || text.includes('complete') || text.includes('uploaded') || text.includes('removed')) return 'success';
+                return null;
+            })();
+            if (toneHint) playFeedbackTone(toneHint);
 
             requestAnimationFrame(() => {
                 toast.style.opacity = '1';
